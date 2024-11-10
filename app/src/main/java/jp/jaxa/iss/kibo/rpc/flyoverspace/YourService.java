@@ -200,31 +200,14 @@ public class YourService extends KiboRpcService {
         distCoeff = new Mat(1, 5, CvType.CV_32F);
 
         if(mode.equals(SIM)){
-            // all numbers via programming manual
-            float[] camArr = {
-                    661.783002f, 0.000000f, 595.212041f,
-                    0.000000f, 671.508662f, 489.094196f,
-                    0.000000f, 0.000000f, 1.000000f
-            };
-            float[] distortionCoefficients = {
-                    -0.215168f, 0.044354f, 0.003615f, 0.005093f, 0.000000f
-            };
-
-            camMat.put(0, 0, camArr);
-            distCoeff.put(0,0, distortionCoefficients);
+            double[][] intrinsics = api.getDockCamIntrinsics();
+            camMat.put(0, 0, intrinsics[0]); //camera matrix
+            distCoeff.put(0, 0, intrinsics[1]); //distortion coeff
         }
         else if(mode.equals(IRL)){
-            float[] camArr = {
-                    753.51021f, 0.0f, 631.11512f,
-                    0.0f, 751.3611f, 508.69621f,
-                    0.0f, 0.0f, 1.0f
-            };
-            float[] distortionCoefficients = {
-                    -0.411405f, 0.177240f, -0.017145f, 0.006421f, 0.000000f
-            };
-
-            camMat.put(0, 0, camArr);
-            distCoeff.put(0,0, distortionCoefficients);
+            double[][] intrinsics = api.getDockCamIntrinsics();
+            camMat.put(0, 0, intrinsics[0]); //camera matrix
+            distCoeff.put(0,0, intrinsics[1]); //distortion coeff
         }
         Log.i(TAG, "Initialized Camera Matrices in Mode: " + mode);
     }
@@ -443,28 +426,55 @@ public class YourService extends KiboRpcService {
      * @param phase the current game phase
      * @return updated targetToHit
      */
-    @SuppressWarnings("all")
-    private int STRATEGIZE(int targetToHit){
-        if(phase == 3 && (targetToHit == 1 || targetToHit == 2)) {
-            if(activeTargets.contains(1)) activeTargets.remove(activeTargets.indexOf(1));
-            if(activeTargets.contains(2)) activeTargets.remove(activeTargets.indexOf(2));
-            targetToHit = activeTargets.get(0);
-            return targetToHit; }
 
-        if(targetToHit == 4 && phase != 3) {
-            activeTargets.remove(activeTargets.indexOf(4));
-            targetToHit = activeTargets.get(0);
-            return targetToHit; }
-
-        if(targetToHit == 2) {
-            activeTargets.remove(activeTargets.indexOf(2));
-            targetToHit = activeTargets.get(0);
-            return targetToHit; }
-
-        if(activeTargets.contains(3) && targetToHit != 3 && phase != 3) {
-            targetToHit = 3;
-            return targetToHit; }
-
-        return targetToHit;
+    private double getDistanceBetweenPoints(Point point1, Point point2) {
+        // Example using Astrobee API to get the distance:
+        double dx = point1.getX() - point2.getX();
+        double dy = point1.getY() - point2.getY();
+        double dz = point1.getZ() - point2.getZ();
+        return Math.sqrt(dx * dx + dy * dy + dz * dz); 
     }
+    @SuppressWarnings("all")
+    private int STRATEGIZE(int targetToHit) {
+        // Prioritize targets in phase 3 based on quickMoves and pointMap
+        if (phase == 3) {
+            int bestTarget = targetToHit;
+            int bestScore = 0;
+    
+            for (int i = 0; i < activeTargets.size(); i++) {
+                int target = activeTargets.get(i);
+                int score = pointMap.get(target) + quickMoves.get(currParent, 0); 
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestTarget = target;
+                }
+            }
+            return bestTarget;
+        }
+    
+        // For earlier phases, prioritize based on a combination of points and distance
+        int bestTarget = targetToHit;
+        double bestScore = Double.NEGATIVE_INFINITY; 
+    
+        for (int i = 0; i < activeTargets.size(); i++) {
+            int target = activeTargets.get(i);
+            
+            // Calculate distance using Astrobee API 
+            double distance = Math.sqrt(
+                Math.pow(targetList.get(currParent).getPoint().getX() - targetList.get(target).getPoint().getX(), 2) +
+                Math.pow(targetList.get(currParent).getPoint().getY() - targetList.get(target).getPoint().getY(), 2) +
+                Math.pow(targetList.get(currParent).getPoint().getZ() - targetList.get(target).getPoint().getZ(), 2)
+            );
+    
+            double score = pointMap.get(target) - distance;
+            if (score > bestScore) {
+                bestScore = score;
+                bestTarget = target;
+            }
+        }
+    
+        return bestTarget;
+    }
+
+    
 }
