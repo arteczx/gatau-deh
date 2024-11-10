@@ -419,14 +419,6 @@ public class YourService extends KiboRpcService {
             e.printStackTrace();
         }
     }
-
-    /**
-     * Strategy function that changes targetToHit based on parameters
-     * @param targetToHit the maximum point target in activeTargets
-     * @param phase the current game phase
-     * @return updated targetToHit
-     */
-
     private double getDistanceBetweenPoints(Point point1, Point point2) {
         // Example using Astrobee API to get the distance:
         double dx = point1.getX() - point2.getX();
@@ -436,14 +428,38 @@ public class YourService extends KiboRpcService {
     }
     @SuppressWarnings("all")
     private int STRATEGIZE(int targetToHit) {
-        // Prioritize targets in phase 3 based on quickMoves and pointMap
+        if (phase == 3 && (targetToHit == 1 || targetToHit == 2)) {
+            if (activeTargets.contains(1)) activeTargets.remove(activeTargets.indexOf(1));
+            if (activeTargets.contains(2)) activeTargets.remove(activeTargets.indexOf(2));
+            targetToHit = activeTargets.get(0);
+            return targetToHit;
+        }
+    
+        if (targetToHit == 4 && phase != 3) {
+            activeTargets.remove(activeTargets.indexOf(4));
+            targetToHit = activeTargets.get(0);
+            return targetToHit;
+        }
+    
+        if (targetToHit == 2) {
+            activeTargets.remove(activeTargets.indexOf(2));
+            targetToHit = activeTargets.get(0);
+            return targetToHit;
+        }
+    
+        if (activeTargets.contains(3) && targetToHit != 3 && phase != 3) {
+            targetToHit = 3;
+            return targetToHit;
+        }
+    
+        // prioritize targets in phase 3 based on quickMoves and pointMap
         if (phase == 3) {
             int bestTarget = targetToHit;
             int bestScore = 0;
     
             for (int i = 0; i < activeTargets.size(); i++) {
                 int target = activeTargets.get(i);
-                int score = pointMap.get(target) + quickMoves.get(currParent, 0); 
+                int score = pointMap.get(target) + quickMoves.get(currParent, 0);
                 if (score > bestScore) {
                     bestScore = score;
                     bestTarget = target;
@@ -452,18 +468,18 @@ public class YourService extends KiboRpcService {
             return bestTarget;
         }
     
-        // For earlier phases, prioritize based on a combination of points and distance
+        //for earlier phases, prioritize based on a combination of points and distance
         int bestTarget = targetToHit;
-        double bestScore = Double.NEGATIVE_INFINITY; 
+        double bestScore = Double.NEGATIVE_INFINITY;
     
         for (int i = 0; i < activeTargets.size(); i++) {
             int target = activeTargets.get(i);
-            
-            // Calculate distance using Astrobee API 
+    
+            //calculate distance using Astrobee API
             double distance = Math.sqrt(
-                Math.pow(targetList.get(currParent).getPoint().getX() - targetList.get(target).getPoint().getX(), 2) +
-                Math.pow(targetList.get(currParent).getPoint().getY() - targetList.get(target).getPoint().getY(), 2) +
-                Math.pow(targetList.get(currParent).getPoint().getZ() - targetList.get(target).getPoint().getZ(), 2)
+                    Math.pow(targetList.get(currParent).getPoint().getX() - targetList.get(target).getPoint().getX(), 2) +
+                            Math.pow(targetList.get(currParent).getPoint().getY() - targetList.get(target).getPoint().getY(), 2) +
+                            Math.pow(targetList.get(currParent).getPoint().getZ() - targetList.get(target).getPoint().getZ(), 2)
             );
     
             double score = pointMap.get(target) - distance;
