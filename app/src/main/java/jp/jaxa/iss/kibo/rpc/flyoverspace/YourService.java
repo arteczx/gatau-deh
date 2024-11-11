@@ -1,26 +1,20 @@
 package jp.jaxa.iss.kibo.rpc.flyoverspace;
 import jp.jaxa.iss.kibo.rpc.api.KiboRpcService;
-
 import java.util.List;
 import java.util.Map;
 import java.util.HashMap;
-import java.util.ArrayList;
+import java.util.LinkedList;
 import java.util.Random;
-
 import gov.nasa.arc.astrobee.Result;
 import gov.nasa.arc.astrobee.types.Point;
 import gov.nasa.arc.astrobee.types.Quaternion;
-
 import org.opencv.core.CvType;
 import org.opencv.core.Mat;
-
 import org.opencv.aruco.Aruco;
 import org.opencv.aruco.DetectorParameters;
 import org.opencv.aruco.Dictionary;
-
 import org.opencv.imgproc.Imgproc;
 import org.opencv.objdetect.QRCodeDetector;
-
 import android.util.Log;
 import android.util.SparseArray;
 import android.util.SparseIntArray;
@@ -30,14 +24,12 @@ import android.util.SparseIntArray;
 public class YourService extends KiboRpcService {
 
     Mat camMat, distCoeff;
-    List<Integer> activeTargets, prevTargets = new ArrayList<>();
+    List<Integer> activeTargets, prevTargets = new LinkedList<>();
     SparseArray<Coordinate> targetList;
     SparseArray<List<Integer>> parentIDInfo;
     SparseIntArray pointMap, quickMoves;
-
     String mQrContent = "No QR Content could be found.";
     int currParent = 0, phase = 1;
-
     final String
             TAG = "FLY OVER SPACE",
             SIM = "Simulator",
@@ -48,13 +40,11 @@ public class YourService extends KiboRpcService {
     protected void runPlan1(){
         // record startTime
         long startTime = System.currentTimeMillis();
-
-        // initialize data and start mission
+        //initialize data and start mission
         api.startMission();
-        initCam(SIM);
         initMaps();
-
-        // handle movement to targets and points per phase optimization
+        initCam(SIM);
+        //handle movement to targets and points per phase optimization
         while(api.getTimeRemaining().get(1) > 80000 && phase <= 3) {
             Log.i(TAG, "Entered phase #" + phase);
             int targetToHit = 0;
@@ -112,7 +102,7 @@ public class YourService extends KiboRpcService {
     protected void runPlan3(){ /* write your plan 3 here */ }
 
     /**
-     * moveTo Coordinate wrapper method
+     * moveTo Coordinate method
      * @param coordinate the coordinate to move to
      * @param scanTag true if moving to a tag to scan, false otherwise
      * @param QR true if moving to QR code, false otherwise
@@ -234,7 +224,7 @@ public class YourService extends KiboRpcService {
 
         Dictionary dict = Aruco.getPredefinedDictionary(Aruco.DICT_5X5_250);
         DetectorParameters detParams = DetectorParameters.create();
-        List<Mat> detectedMarkers = new ArrayList<>();
+        List<Mat> detectedMarkers = new LinkedList<>();
 
         Aruco.detectMarkers(undistorted, dict, detectedMarkers, ids, detParams);
         List<Integer> markerIds = getIdsFromMat(ids);
@@ -357,7 +347,7 @@ public class YourService extends KiboRpcService {
      * @return the Mat converted to ArrayList
      */
     private List<Integer> getIdsFromMat(Mat ids){
-        List<Integer> markerIds = new ArrayList<>();
+        List<Integer> markerIds = new LinkedList<>();
         for(int i = 0; i < ids.rows(); i++){
             for(int j = 0; j < ids.cols(); j++){
                 double[] idData = ids.get(i, j);
@@ -384,9 +374,9 @@ public class YourService extends KiboRpcService {
         Log.i(TAG, "Initialized Movement SparseArray");
 
         parentIDInfo = new SparseArray<>();
-        List<Integer> _12356QR_ = new ArrayList<Integer>(){{
+        List<Integer> _12356QR_ = new LinkedList<Integer>(){{
             add(1); add(2); add(3); add(5); add(6); add(7);}};
-        List<Integer> _4G_ = new ArrayList<Integer>(){{add(4); add(8);}};
+        List<Integer> _4G_ = new LinkedList<Integer>(){{add(4); add(8);}};
         parentIDInfo.put(1, _12356QR_);
         parentIDInfo.put(2, _4G_);
         Log.i(TAG, "Initialized Parent ID SparseArray");
@@ -424,7 +414,7 @@ public class YourService extends KiboRpcService {
         double dx = point1.getX() - point2.getX();
         double dy = point1.getY() - point2.getY();
         double dz = point1.getZ() - point2.getZ();
-        return Math.sqrt(dx * dx + dy * dy + dz * dz); 
+        return Math.sqrt(dx * dx + dy * dy + dz * dz);
     }
     @SuppressWarnings("all")
     private int STRATEGIZE(int targetToHit) {
@@ -434,29 +424,29 @@ public class YourService extends KiboRpcService {
             targetToHit = activeTargets.get(0);
             return targetToHit;
         }
-    
+
         if (targetToHit == 4 && phase != 3) {
             activeTargets.remove(activeTargets.indexOf(4));
             targetToHit = activeTargets.get(0);
             return targetToHit;
         }
-    
+
         if (targetToHit == 2) {
             activeTargets.remove(activeTargets.indexOf(2));
             targetToHit = activeTargets.get(0);
             return targetToHit;
         }
-    
+
         if (activeTargets.contains(3) && targetToHit != 3 && phase != 3) {
             targetToHit = 3;
             return targetToHit;
         }
-    
+
         // prioritize targets in phase 3 based on quickMoves and pointMap
         if (phase == 3) {
             int bestTarget = targetToHit;
             int bestScore = 0;
-    
+
             for (int i = 0; i < activeTargets.size(); i++) {
                 int target = activeTargets.get(i);
                 int score = pointMap.get(target) + quickMoves.get(currParent, 0);
@@ -467,30 +457,30 @@ public class YourService extends KiboRpcService {
             }
             return bestTarget;
         }
-    
+
         //for earlier phases, prioritize based on a combination of points and distance
         int bestTarget = targetToHit;
         double bestScore = Double.NEGATIVE_INFINITY;
-    
+
         for (int i = 0; i < activeTargets.size(); i++) {
             int target = activeTargets.get(i);
-    
+
             //calculate distance using Astrobee API
             double distance = Math.sqrt(
                     Math.pow(targetList.get(currParent).getPoint().getX() - targetList.get(target).getPoint().getX(), 2) +
                             Math.pow(targetList.get(currParent).getPoint().getY() - targetList.get(target).getPoint().getY(), 2) +
                             Math.pow(targetList.get(currParent).getPoint().getZ() - targetList.get(target).getPoint().getZ(), 2)
             );
-    
+
             double score = pointMap.get(target) - distance;
             if (score > bestScore) {
                 bestScore = score;
                 bestTarget = target;
             }
         }
-    
+
         return bestTarget;
     }
 
-    
+
 }
