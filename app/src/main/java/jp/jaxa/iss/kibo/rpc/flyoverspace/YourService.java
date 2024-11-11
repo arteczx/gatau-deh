@@ -60,7 +60,7 @@ public class YourService extends KiboRpcService {
             targetToHit = ListUtils.findMaxFromMap(activeTargets, pointMap);
 
             if(activeTargets.size() > 1)
-                targetToHit = STRATEGIZE(targetToHit);
+                targetToHit = hit(targetToHit);
 
             if(api.getTimeRemaining().get(1) < 80000) break;
 
@@ -417,7 +417,7 @@ public class YourService extends KiboRpcService {
         return Math.sqrt(dx * dx + dy * dy + dz * dz);
     }
     @SuppressWarnings("all")
-    private int STRATEGIZE(int targetToHit) {
+    private int hit(int targetToHit) {
         if (phase == 3 && (targetToHit == 1 || targetToHit == 2)) {
             if (activeTargets.contains(1)) activeTargets.remove(activeTargets.indexOf(1));
             if (activeTargets.contains(2)) activeTargets.remove(activeTargets.indexOf(2));
