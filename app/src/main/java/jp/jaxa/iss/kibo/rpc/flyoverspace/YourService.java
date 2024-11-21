@@ -449,7 +449,6 @@ public class YourService extends KiboRpcService {
         }
     }
     private double getDistanceBetweenPoints(Point point1, Point point2) {
-        // Example using Astrobee API to get the distance:
         double dx = point1.getX() - point2.getX();
         double dy = point1.getY() - point2.getY();
         double dz = point1.getZ() - point2.getZ();
@@ -460,7 +459,7 @@ public class YourService extends KiboRpcService {
         // Skip targets 1 and 2 in phase 3
         // Reason: These targets are less valuable in final phase, better to focus on others
         if (phase == 3 && (targetToHit == 1 || targetToHit == 2)) {
-            activeTargets.removeAll(List.of(1, 2)); // More efficient than removing individually
+            activeTargets.removeAll(List.of(1, 2)); 
             return activeTargets.get(0);
         }
 
