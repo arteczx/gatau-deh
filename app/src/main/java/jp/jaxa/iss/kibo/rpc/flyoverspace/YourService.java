@@ -1,6 +1,7 @@
 package jp.jaxa.iss.kibo.rpc.flyoverspace;
 import jp.jaxa.iss.kibo.rpc.api.KiboRpcService;
 import java.util.List;
+import java.util.ArrayList;
 import java.util.Map;
 import java.util.HashMap;
 import java.util.LinkedList;
