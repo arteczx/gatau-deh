@@ -6,6 +6,10 @@ import java.util.Map;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.Random;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.CompletableFuture;
 import gov.nasa.arc.astrobee.Result;
 import gov.nasa.arc.astrobee.types.Point;
 import gov.nasa.arc.astrobee.types.Quaternion;
@@ -35,6 +39,7 @@ public class YourService extends KiboRpcService {
             TAG = "FLY OVER SPACE",
             SIM = "Simulator",
             IRL = "Orbit";
+    private final ExecutorService executorService = Executors.newFixedThreadPool(2);
 
     @Override
     @SuppressWarnings("all")
@@ -43,9 +48,17 @@ public class YourService extends KiboRpcService {
         long startTime = System.currentTimeMillis();
         
         // Initialize and start mission in one block for better organization
-        api.startMission();
-        initMaps();
-        initCam(SIM);
+        CompletableFuture<Void> initFuture = CompletableFuture.runAsync(() -> {
+            api.startMission();
+            initMaps();
+        }, executorService);
+        
+        CompletableFuture<Void> camInitFuture = CompletableFuture.runAsync(() -> {
+            initCam(SIM);
+        }, executorService);
+        
+        // Wait for initialization to complete
+        CompletableFuture.allOf(initFuture, camInitFuture).join();
         
         // Main mission loop with optimized time checks and logging
         while(api.getTimeRemaining().get(1) > 80000 && phase <= 3) {
@@ -59,18 +72,26 @@ public class YourService extends KiboRpcService {
             }
 
             // Get and process active targets more efficiently
-            activeTargets = api.getActiveTargets();
+            CompletableFuture<List<Integer>> targetsFuture = CompletableFuture.supplyAsync(() -> {
+                return api.getActiveTargets();
+            }, executorService);
+            
+            activeTargets = targetsFuture.join();
             Log.i(TAG, "Active Targets: " + activeTargets);
             
             // Optimize target selection
-            int targetToHit = ListUtils.findMaxFromMap(activeTargets, pointMap);
-            if(activeTargets.size() > 1) {
-                targetToHit = hit(targetToHit);
-            }
+            CompletableFuture<Integer> targetSelectionFuture = CompletableFuture.supplyAsync(() -> {
+                int targetToHit = ListUtils.findMaxFromMap(activeTargets, pointMap);
+                if(activeTargets.size() > 1) {
+                    targetToHit = hit(targetToHit);
+                }
+                return targetToHit;
+            }, executorService);
 
             // Check time again before moving
             if(api.getTimeRemaining().get(1) < 80000) break;
 
+            int targetToHit = targetSelectionFuture.join();
             Log.i(TAG, "Targeting #" + targetToHit);
             moveTo(targetList.get(targetToHit), true, false);
             
@@ -88,9 +109,15 @@ public class YourService extends KiboRpcService {
         
         if(shouldScanQR) {
             Log.i(TAG, "Scanning QR Code");
-            moveTo(targetList.get(7), false, true);
+            CompletableFuture<Void> qrFuture = CompletableFuture.runAsync(() -> {
+                moveTo(targetList.get(7), false, true);
+            }, executorService);
+            qrFuture.join();
         } else {
-            scanQR(false);
+            CompletableFuture<String> scanFuture = CompletableFuture.supplyAsync(() -> {
+                return scanQR(false);
+            }, executorService);
+            scanFuture.join();
             Log.i(TAG, "Skipped QR scan to save time");
         }
         Log.i(TAG, "QR Content: " + mQrContent);
@@ -103,6 +130,9 @@ public class YourService extends KiboRpcService {
         long missionTime = System.currentTimeMillis() - startTime;
         Log.i(TAG, String.format("Mission completed in: %.1fs", missionTime/1000.0));
         api.reportMissionCompletion(mQrContent);
+        
+        // Shutdown thread pool
+        executorService.shutdown();
     }
 
     /**
