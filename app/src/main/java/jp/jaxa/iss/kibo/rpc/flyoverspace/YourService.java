@@ -1,554 +1,499 @@
-package jp.jaxa.iss.kibo.rpc.flyoverspace;
+package jp.jaxa.iss.kibo.rpc.sampleapk;
+
 import jp.jaxa.iss.kibo.rpc.api.KiboRpcService;
-import java.util.List;
-import java.util.ArrayList;
-import java.util.Map;
-import java.util.HashMap;
-import java.util.LinkedList;
-import java.util.Random;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.CompletableFuture;
-import gov.nasa.arc.astrobee.Result;
 import gov.nasa.arc.astrobee.types.Point;
 import gov.nasa.arc.astrobee.types.Quaternion;
-import org.opencv.core.CvType;
-import org.opencv.core.Mat;
-import org.opencv.aruco.Aruco;
-import org.opencv.aruco.DetectorParameters;
-import org.opencv.aruco.Dictionary;
+import org.opencv.core.*;
 import org.opencv.imgproc.Imgproc;
-import org.opencv.objdetect.QRCodeDetector;
-import android.util.Log;
-import android.util.SparseArray;
-import android.util.SparseIntArray;
+import org.opencv.aruco.Aruco;
+import org.opencv.aruco.Dictionary;
+import java.util.*;
 
-/** Class meant to handle commands from the Ground Data System and execute them in Astrobee */
-@SuppressWarnings("SpellCheckingException")
+/**
+ * class meant to handle commands from the Ground Data System and execute them in Astrobee.
+ */
+
 public class YourService extends KiboRpcService {
+    //Astrobee specifications
+    private static final double MAX_VELOCITY = 0.5;  // m/s
+    private static final double MIN_DISTANCE = 0.05; // m
+    private static final double MIN_ANGLE = 7.5;     // degrees
+    private static final double MAX_THRUST_X = 0.6;  // N
+    private static final double ROBOT_MASS = 10.0;   // kg
 
-    Mat camMat, distCoeff;
-    List<Integer> activeTargets, prevTargets = new LinkedList<>();
-    SparseArray<Coordinate> targetList;
-    SparseArray<List<Integer>> parentIDInfo;
-    SparseIntArray pointMap, quickMoves;
-    String mQrContent = "No QR Content could be found.";
-    int currParent = 0, phase = 1;
-    final String
-            TAG = "FLY OVER SPACE",
-            SIM = "Simulator",
-            IRL = "Orbit";
-    private final ExecutorService executorService = Executors.newFixedThreadPool(2);
+    //KIZ boundaries
+    private static final double[] KIZ1_BOUNDS = {10.3, -10.2, 4.32, 11.55, -6.0, 5.57};
+    private static final double[] KIZ2_BOUNDS = {9.5, -10.5, 4.02, 10.5, -9.6, 4.8};
 
-    @Override
-    @SuppressWarnings("all")
-    protected void runPlan1(){
-        // record startTime
-        long startTime = System.currentTimeMillis();
-        
-        // Initialize and start mission in one block for better organization
-        CompletableFuture<Void> initFuture = CompletableFuture.runAsync(() -> {
-            api.startMission();
-            initMaps();
-        }, executorService);
-        
-        CompletableFuture<Void> camInitFuture = CompletableFuture.runAsync(() -> {
-            initCam(SIM);
-        }, executorService);
-        
-        // Wait for initialization to complete
-        CompletableFuture.allOf(initFuture, camInitFuture).join();
-        
-        // Main mission loop with optimized time checks and logging
-        while(api.getTimeRemaining().get(1) > 80000 && phase <= 3) {
-            long timeRemaining = api.getTimeRemaining().get(1);
-            Log.i(TAG, String.format("Phase #%d, Time remaining: %dms", phase, timeRemaining));
-            
-            // Break early if not enough time for phase 3
-            if(timeRemaining <= 80000 && phase == 3) {
-                Log.i(TAG, "Breaking loop - insufficient time for phase 3");
-                break;
-            }
+    //KOZ boundaries (x_min, y_min, z_min, x_max, y_max, z_max)
+    private static final double[][] KOZ_BOUNDS = {
+        //KOZ1
+        {10.87, -9.5, 4.27, 11.6, -9.45, 4.97},    //pos 1
+        {10.25, -9.5, 4.97, 10.87, -9.45, 5.62},   //pos 2
+        //KOZ2
+        {10.87, -8.5, 4.97, 11.6, -8.45, 5.62},    //pos 1
+        {10.25, -8.5, 4.27, 10.7, -8.45, 4.97},    //pos 2
+        //KOZ3
+        {10.87, -7.40, 4.27, 11.6, -7.35, 4.97},   //pos 1
+        {10.25, -7.40, 4.97, 10.87, -7.35, 5.62}   //pos 2
+    };
 
-            // Get and process active targets more efficiently
-            CompletableFuture<List<Integer>> targetsFuture = CompletableFuture.supplyAsync(() -> {
-                return api.getActiveTargets();
-            }, executorService);
-            
-            activeTargets = targetsFuture.join();
-            Log.i(TAG, "Active Targets: " + activeTargets);
-            
-            // Optimize target selection
-            CompletableFuture<Integer> targetSelectionFuture = CompletableFuture.supplyAsync(() -> {
-                int targetToHit = ListUtils.findMaxFromMap(activeTargets, pointMap);
-                if(activeTargets.size() > 1) {
-                    targetToHit = hit(targetToHit);
-                }
-                return targetToHit;
-            }, executorService);
+    //safe waypoints for navigation
+    private final Point[] safeWaypoints = {
+        new Point(10.0, -9.8, 4.5),   //near dock
+        new Point(10.3, -9.0, 4.5),   //between KOZ1 and KOZ2
+        new Point(10.3, -8.0, 4.5),   //between KOZ2 and KOZ3
+        new Point(10.3, -7.0, 4.5)    //past KOZ3
+    };
 
-            // Check time again before moving
-            if(api.getTimeRemaining().get(1) < 80000) break;
+    //def the coordinates for each area
+    private final Point[] areaPoints = new Point[] {
+        new Point(10.95, -10.585, 4.82), //area 1 center
+        new Point(10.925, -8.875, 3.76203), //area 2 center
+        new Point(10.925, -7.875, 3.76203), //area 3 center
+        new Point(9.866984, -6.8525, 4.32)  //area 4 center
+    };
+    
+    private final Point startPoint = new Point(9.815, -9.806, 4.293);
+    private final Point astronautPoint = new Point(11.143, -6.7607, 4.9654);
+    private final Quaternion startQuaternion = new Quaternion(1f, 0f, 0f, 0f);
+    private final Quaternion astronautQuaternion = new Quaternion(0f, 0f, 0.707f, 0.707f);
+    
+    //map to store found items and their locations
+    private HashMap<Integer, String> foundItemsMap = new HashMap<>();
+    private int targetAreaId = -1;
 
-            int targetToHit = targetSelectionFuture.join();
-            Log.i(TAG, "Targeting #" + targetToHit);
-            moveTo(targetList.get(targetToHit), true, false);
-            
-            prevTargets.add(targetToHit);
-            Log.i(TAG, "Previous targets: " + prevTargets);
-            phase++;
-        }
+    //define mapping between AR markers and items
+    private final HashMap<Integer, String> markerToItem = new HashMap<Integer, String>() {{
+        put(1, "tape");
+        put(2, "top");
+        put(3, "screwdriver");
+        put(4, "beaker");
+        put(5, "hammer");
+        put(6, "pipette");
+        put(7, "wrench");
+        put(8, "thermometer");
+        put(9, "watch");
+        put(10, "goggle");
+    }};
 
-        // Optimize QR code handling
-        long finalTimeRemaining = api.getTimeRemaining().get(1);
-        Log.i(TAG, String.format("Mission loop complete. Time remaining: %dms", finalTimeRemaining));
-        
-        boolean shouldScanQR = finalTimeRemaining > 80000 && 
-                              prevTargets.get(prevTargets.size() - 1) != 4;
-        
-        if(shouldScanQR) {
-            Log.i(TAG, "Scanning QR Code");
-            CompletableFuture<Void> qrFuture = CompletableFuture.runAsync(() -> {
-                moveTo(targetList.get(7), false, true);
-            }, executorService);
-            qrFuture.join();
-        } else {
-            CompletableFuture<String> scanFuture = CompletableFuture.supplyAsync(() -> {
-                return scanQR(false);
-            }, executorService);
-            scanFuture.join();
-            Log.i(TAG, "Skipped QR scan to save time");
-        }
-        Log.i(TAG, "QR Content: " + mQrContent);
+    //camera offsets from center point
+    private static final double[] NAV_CAM_OFFSET = {0.1177, -0.0422, -0.0826};
+    private static final double[] HAZ_CAM_OFFSET = {0.1328, 0.0362, -0.0826};
 
-        // Final goal approach
-        api.notifyGoingToGoal();
-        moveTo(targetList.get(8), false, false);
-
-        // Mission completion
-        long missionTime = System.currentTimeMillis() - startTime;
-        Log.i(TAG, String.format("Mission completed in: %.1fs", missionTime/1000.0));
-        api.reportMissionCompletion(mQrContent);
-        
-        // Shutdown thread pool
-        executorService.shutdown();
+    //mt to get corrected point for NavCam view
+    private Point getCorrectedPointForNavCam(Point target) {
+        return new Point(
+            target.getX() - NAV_CAM_OFFSET[0],
+            target.getY() - NAV_CAM_OFFSET[1],
+            target.getZ() - NAV_CAM_OFFSET[2]
+        );
     }
 
-    /**
-     * moveTo Coordinate method
-     * @param coordinate the coordinate to move to
-     * @param scanTag true if moving to a tag to scan, false otherwise
-     * @param QR true if moving to QR code, false otherwise
-     * @return the scanned tag, if scanTag is true, else 0 (Unused)
-     */
-    @SuppressWarnings("UnusedReturnValue")
-    private int moveTo(Coordinate coordinate, boolean scanTag, boolean QR){
-        int target = targetList.indexOfValue(coordinate);
-
-        if(coordinate.hasParent()){
-            Coordinate parent = coordinate.getParent();
-            moveTo(parent, false, false);
-            currParent = parent.parentID;
-            Log.i(TAG, "Current Parent ID: " + currParent); }
-
-        moveTo(coordinate.getPoint(), coordinate.getQuaternion());
-        if (scanTag) targetLaser(target);
-        else if (QR) mQrContent = scanQR(false);
-
-        if(coordinate.hasParent() && (target != 4) && (target != 8)) {
-            Coordinate parent = coordinate.getParent();
-            moveTo(parent, false, false);
-            currParent = parent.parentID;
-            Log.i(TAG, "Current Parent ID: " + currParent); }
-
-        return target;
-    }
-
-    /**
-     * Wrapper function for api.moveTo(point, quaternion, boolean) to make a failsafe
-     * in case initial movement fails, and log movement details.
-     * @param point the Point to move to
-     * @param quaternion the Quaternion to angle Astrobee to
-     */
-    private void moveTo(Point point, Quaternion quaternion) {
-        final int LOOP_MAX = 5; // Reduced from 10 since most failures happen in first few attempts
-        final int RETRY_DELAY_MS = 500; // Reduced delay to save time
-        
-        Log.i(TAG, String.format("Moving to: %.2f, %.2f, %.2f", 
-            point.getX(), point.getY(), point.getZ())); // More efficient string formatting
-        
-        Result result;
-        int loopCounter = 0;
-        
-        do {
-            if (loopCounter > 0) {
-                try {
-                    Thread.sleep(RETRY_DELAY_MS);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt(); // Proper interrupt handling
-                    return;
-                }
-            }
-            
-            long start = System.currentTimeMillis();
-            result = api.moveTo(point, quaternion, true);
-            long elapsedTime = System.currentTimeMillis() - start;
-            
-            Log.i(TAG, String.format("[%d] moveTo finished in: %ds, succeeded: %b",
-                loopCounter, elapsedTime/1000, result.hasSucceeded()));
-                
-            loopCounter++;
-        } while (!result.hasSucceeded() && loopCounter < LOOP_MAX);
-    }
-
-    /** moveTo double/float Specifics wrapper */
-    @SuppressWarnings("unused")
-    private void moveTo(double pt_x, double pt_y, double pt_z, float q_x, float q_y, float q_z, float q_w){
-        moveTo(new Point(pt_x, pt_y, pt_z), new Quaternion(q_x, q_y, q_z, q_w));
-    }
-
-    /**
-     * Pre-Load the Camera Matrix and Distortion Coefficients to save time.
-     * @param mode 'SIM' or 'IRL' -> Simulator or Real Coefficients, Respectively
-     */
-    @SuppressWarnings("SameParameterValue")
-    private void initCam(String mode){
-        camMat = new Mat(3, 3, CvType.CV_32F);
-        distCoeff = new Mat(1, 5, CvType.CV_32F);
-
-        if(mode.equals(SIM)){
-            double[][] intrinsics = api.getDockCamIntrinsics();
-            camMat.put(0, 0, intrinsics[0]); //camera matrix
-            distCoeff.put(0, 0, intrinsics[1]); //distortion coeff
-        }
-        else if(mode.equals(IRL)){
-            double[][] intrinsics = api.getDockCamIntrinsics();
-            camMat.put(0, 0, intrinsics[0]); //camera matrix
-            distCoeff.put(0,0, intrinsics[1]); //distortion coeff
-        }
-        Log.i(TAG, "Initialized Camera Matrices in Mode: " + mode);
-    }
-
-    /**
-     * Processes NavCam Matrix and Scans for AprilTags within NavCam
-     * @return the ID of the Target found in the NavCam, and 0 if none found.
-     */
-    @SuppressWarnings({"UnusedReturnValue", "unused"})
-    private int getTagInfo(int tagNum){
-        Log.i(TAG, "Calling getTagInfo() function");
-        long start = System.currentTimeMillis();
-
-        Mat
-                undistorted = new Mat(),
-                ids = new Mat();
-
-        api.flashlightControlFront(0.05f); // enable flashlight for tag read clarity
-        Mat distorted = api.getMatNavCam();
-        api.flashlightControlFront(0.00f);
-
-        Imgproc.undistort(distorted, undistorted, camMat, distCoeff);
-        Log.i(TAG, "Undistorted Image Successfully");
-
-        Dictionary dict = Aruco.getPredefinedDictionary(Aruco.DICT_5X5_250);
-        DetectorParameters detParams = DetectorParameters.create();
-        List<Mat> detectedMarkers = new LinkedList<>();
-
-        Aruco.detectMarkers(undistorted, dict, detectedMarkers, ids, detParams);
-        List<Integer> markerIds = getIdsFromMat(ids);
-
-        int iters = 0, iter_max = 10, target = 0;
-        while(markerIds.size() == 0 && iters < iter_max){
-            Log.i(TAG, "No Markers found. Trying again [" + iters + "]");
-            Aruco.detectMarkers(undistorted, dict, detectedMarkers, ids, detParams);
-            markerIds = getIdsFromMat(ids);
-            if(markerIds.size() != 0)
-                break;
-
-            iters++;
-        }
-        Log.i(TAG, "Marker IDs Found: " + markerIds.toString());
-
-        if (ListUtils.containsAny(markerIds, Constants.targetOneIDs)){target = 1;}
-        else if (ListUtils.containsAny(markerIds, Constants.targetTwoIDs)){target = 2;}
-        else if (ListUtils.containsAny(markerIds, Constants.targetThreeIDs)){target = 3;}
-        else if (ListUtils.containsAny(markerIds, Constants.targetFourIDs)){target = 4;}
-        else if (ListUtils.containsAny(markerIds, Constants.targetFiveIDs)){target = 5;}
-        else if (ListUtils.containsAny(markerIds, Constants.targetSixIDs)){target = 6;}
-
-        long delta = (System.currentTimeMillis() - start)/1000;
-        Log.i(TAG, "Found Target #" + target);
-        Log.i(TAG, "Read AprilTags in " + delta + " seconds");
-
-        api.saveMatImage(undistorted, "tag" + target + "Image.png");
-        return target;
-    }
-
-    /**
-     * Scans and decodes QR code content, with optimized error handling and caching
-     * @param skipQRread Flag to skip actual QR reading and use fallback
-     * @return Decoded QR code message string
-     */
-    private String scanQR(boolean skipQRread) {
-        Log.i(TAG, "Arrived at QR Code");
-
-        // Move map initialization to a static final field to avoid recreating each time
-        final Map<String, String> QR_MESSAGES = new HashMap<String, String>() {{
-            put("JEM", "STAY_AT_JEM");
-            put("COLUMBUS", "GO_TO_COLUMBUS"); 
-            put("RACK1", "CHECK_RACK_1");
-            put("ASTROBEE", "I_AM_HERE");
-            put("INTBALL", "LOOKING_FORWARD_TO_SEE_YOU");
-            put("BLANK", "NO_PROBLEM");
-        }};
-
-        if(skipQRread) {
-            // Early return if skipping QR read
-            return getRandomQRMessage(QR_MESSAGES);
-        }
-
-        // Initialize detector once
-        QRCodeDetector detector = new QRCodeDetector();
-        Mat points = new Mat();
-        Mat qrImage = new Mat();
-
-        // Capture and process image
-        api.flashlightControlFront(0.05f);
-        Mat navCam = api.getMatNavCam();
-        api.flashlightControlFront(0.0f);
-        
-        Imgproc.undistort(navCam, qrImage, camMat, distCoeff);
-        api.saveMatImage(qrImage, "qrCode.png");
-
-        Log.i(TAG, "Attempting QR Code Scan");
-        String data = detector.detectAndDecode(qrImage, points);
-
-        // Retry logic with fixed number of attempts
-        int attempts = 0;
-        while(points.empty() && attempts < 10) {
-            Log.i(TAG, "No QR found. Trying again [" + attempts + "]");
-            points.release(); // Release previous points Mat
-            points = new Mat();
-            data = detector.detectAndDecode(qrImage, points);
-            if(!points.empty()) break;
-            attempts++;
-        }
-
-        // Clean up Mats
-        points.release();
-        qrImage.release();
-        navCam.release();
-
-        if(!points.empty()) {
-            Log.i(TAG, "Scanned QR Code and got data: " + data);
-            return QR_MESSAGES.get(data);
-        }
-
-        Log.i(TAG, "QR Scan failed, using fallback");
-        return getRandomQRMessage(QR_MESSAGES);
-    }
-
-    /**
-     * Helper method to get random QR message for fallback
-     */
-    private String getRandomQRMessage(Map<String, String> messages) {
-        String[] keys = messages.keySet().toArray(new String[0]);
-        String randomKey = keys[new Random().nextInt(keys.length)];
-        Log.i(TAG, "Using fallback message for key: " + randomKey);
-        return messages.get(randomKey);
-    }
-
-    /**
-     * Method to handle Laser Targeting
-     * @param targetNum the laser to target
-     */
-    private void targetLaser(int targetNum) {
-        // Early return pattern for better readability and efficiency
-        if(!activeTargets.contains(targetNum)) {
-            return;
-        }
-
-        // Calculate duration in seconds directly to avoid unnecessary arithmetic
-        long startTime = System.currentTimeMillis();
-        float durationInSeconds = (System.currentTimeMillis() - startTime) / 1000f;
-
+    //mt to process and save debug images
+    private void saveDebugImage(Mat image, String prefix, int counter) {
         try {
-            // Group related operations together
-            api.laserControl(true);
-            Log.i(TAG, "Laser on.");
-            
-            // Save image and take snapshot in sequence
-            api.saveMatImage(api.getMatNavCam(), String.format("target_%d.png", targetNum));
-            Thread.sleep(1000); // Use Thread.sleep() for better clarity
-            api.takeTargetSnapshot(targetNum);
-            
-            // Update tracking state
-            prevTargets.add(targetNum);
-            Log.i(TAG, String.format("Took Target #%d snapshot successfully.", targetNum));
-            
-        } finally {
-            // Ensure laser is turned off even if exception occurs
-            api.laserControl(false);
-            Log.i(TAG, String.format("Laser off after being on for: %.2fs", durationInSeconds));
-        }
-    }
-
-    /**
-     * Takes in a Mat and returns its elements as ArrayList
-     * @param ids the Mat to convert to ArrayList
-     * @return the Mat converted to ArrayList
-     */
-    private List<Integer> getIdsFromMat(Mat ids) {
-        // Using ArrayList instead of LinkedList for better random access performance
-        // since we're only doing sequential adds and no insertions/deletions
-        List<Integer> markerIds = new ArrayList<>(ids.rows() * ids.cols());
-        
-        // Get direct access to Mat data for faster iteration
-        // Avoid repeated get() calls which involve bounds checking
-        double[] data = new double[ids.rows() * ids.cols()];
-        ids.get(0, 0, data);
-        
-        // Single loop is more efficient than nested loops
-        for (int i = 0; i < data.length; i++) {
-            markerIds.add((int)data[i]);
-        }
-        return markerIds;
-    }
-
-    /**
-     * Initializes all data structures based on Map<> or List<>
-     * Post-condition: targetList, parentIDInfo, and pointMap are initialized
-     */
-    private void initMaps(){
-        // Initialize targetList with all target coordinates
-        // Reason: Using SparseArray is memory efficient for sparse indices
-        targetList = new SparseArray<>();
-        targetList.put(0, Constants.start);
-        targetList.put(1, Constants.targetOne); 
-        targetList.put(2, Constants.targetTwo);
-        targetList.put(3, Constants.targetThree);
-        targetList.put(4, Constants.targetFour);
-        targetList.put(5, Constants.targetFive);
-        targetList.put(6, Constants.targetSix);
-        targetList.put(7, Constants.targetQR);
-        targetList.put(8, Constants.goal);
-        Log.i(TAG, "Initialized Movement SparseArray");
-
-        // Group targets by their parent locations for optimized path planning
-        // Reason: Reduces redundant movements by organizing targets hierarchically
-        parentIDInfo = new SparseArray<>();
-        List<Integer> mainAreaTargets = new LinkedList<>();
-        mainAreaTargets.addAll(List.of(1, 2, 3, 5, 6, 7)); // Targets accessible from main area
-        List<Integer> secondaryAreaTargets = new LinkedList<>();
-        secondaryAreaTargets.addAll(List.of(4, 8)); // Targets in secondary area
-        parentIDInfo.put(1, mainAreaTargets);
-        parentIDInfo.put(2, secondaryAreaTargets);
-        Log.i(TAG, "Initialized Parent ID SparseArray");
-
-        // Initialize point values for scoring optimization
-        // Reason: SparseIntArray is more efficient than HashMap for primitive int keys and values
-        pointMap = new SparseIntArray(6); // Pre-size for efficiency
-        pointMap.put(1, 30); pointMap.put(2, 20);
-        pointMap.put(3, 40); pointMap.put(4, 20);
-        pointMap.put(5, 30); pointMap.put(6, 30);
-        Log.i(TAG, "Initialized Points SparseIntArray");
-
-        // Define efficient paths between nearby targets
-        // Reason: Optimizes movement by pre-calculating shortest paths between targets
-        quickMoves = new SparseIntArray(14); // Pre-size for efficiency
-        int[][] moves = {
-            {1,4}, {4,1}, {1,5}, {5,1}, {1,6}, {6,1},
-            {2,6}, {6,2}, {4,5}, {5,4}, {4,6}, {6,4},
-            {5,6}, {6,5}
-        };
-        for(int[] move : moves) {
-            quickMoves.put(move[0], move[1]);
-        }
-        Log.i(TAG, "Initialized QuickMoves SparseIntArray");
-    }
-
-    /**
-     * Helper function for Thread.sleep to avoid long Exception Handling blocks
-     * @param millis milliseconds to sleep for
-     */
-    private void sleep(long millis){
-        try {
-            Thread.sleep(millis);
-        } catch(InterruptedException e) {
+            String filename = String.format("%s_%d.png", prefix, counter);
+            saveMatImage(image, filename);
+        } catch (Exception e) {
             e.printStackTrace();
         }
     }
-    private double getDistanceBetweenPoints(Point point1, Point point2) {
-        double dx = point1.getX() - point2.getX();
-        double dy = point1.getY() - point2.getY();
-        double dz = point1.getZ() - point2.getZ();
-        return Math.sqrt(dx * dx + dy * dy + dz * dz);
-    }
-    @SuppressWarnings("all")
-    private int hit(int targetToHit) {
-        // Skip targets 1 and 2 in phase 3
-        // Reason: These targets are less valuable in final phase, better to focus on others
-        if (phase == 3 && (targetToHit == 1 || targetToHit == 2)) {
-            activeTargets.removeAll(List.of(1, 2)); 
-            return activeTargets.get(0);
-        }
 
-        // Skip target 4 except in phase 3
-        // Reason: Target 4 is better handled in final phase when time is critical
-        if (targetToHit == 4 && phase != 3) {
-            activeTargets.remove(Integer.valueOf(4)); // Using Integer.valueOf prevents index removal bug
-            return activeTargets.get(0);
-        }
-
-        // Always skip target 2
-        // Reason: Target 2 has low point value (20) and is likely out of optimal path
-        if (targetToHit == 2) {
-            activeTargets.remove(Integer.valueOf(2));
-            return activeTargets.get(0);
-        }
-
-        // Prioritize target 3 except in phase 3
-        // Reason: Target 3 has highest point value (40), best to capture early
-        if (activeTargets.contains(3) && targetToHit != 3 && phase != 3) {
-            return 3;
-        }
-
-        // Phase 3: Prioritize based on points and quick moves
-        // Reason: In final phase, we optimize for both points and movement efficiency
-        if (phase == 3) {
-            int bestTarget = targetToHit;
-            int maxScore = 0;
+    //AR marker detection with debug
+    private List<Integer> detectArUcoMarkers(Mat image, String debugPrefix) {
+        List<Integer> detectedMarkers = new ArrayList<>();
+        try {
+            Mat gray = new Mat();
+            Imgproc.cvtColor(image, gray, Imgproc.COLOR_BGR2GRAY);
             
-            for (int target : activeTargets) { // Enhanced for loop is cleaner and slightly faster
-                int score = pointMap.get(target) + quickMoves.get(currParent, 0);
-                if (score > maxScore) {
-                    maxScore = score;
-                    bestTarget = target;
+            //get NavCam intrinsics
+            double[][] camParams = api.getNavCamIntrinsics();
+            Mat cameraMatrix = new Mat(3, 3, CvType.CV_64F);
+            Mat distCoeffs = new Mat(1, 5, CvType.CV_64F);
+            
+            //set camera matrix
+            for (int i = 0; i < 3; i++) {
+                for (int j = 0; j < 3; j++) {
+                    cameraMatrix.put(i, j, camParams[0][i * 3 + j]);
                 }
             }
-            return bestTarget;
-        }
+            //set distortion coefficients
+            for (int i = 0; i < 5; i++) {
+                distCoeffs.put(0, i, camParams[1][i]);
+            }
 
-        // Earlier phases: Balance points and distance
-        // Reason: In early phases, we want to maximize points while minimizing travel distance
-        int bestTarget = targetToHit;
-        double maxScore = Double.NEGATIVE_INFINITY;
-        Point currentPoint = targetList.get(currParent).getPoint();
+            //enhance image
+            Imgproc.GaussianBlur(gray, gray, new Size(5, 5), 0);
+            Imgproc.adaptiveThreshold(gray, gray, 255,
+                    Imgproc.ADAPTIVE_THRESH_GAUSSIAN_C,
+                    Imgproc.THRESH_BINARY, 11, 2);
 
-        for (int target : activeTargets) {
-            Point targetPoint = targetList.get(target).getPoint();
-            // Using existing helper method instead of manual calculation
-            double distance = getDistanceBetweenPoints(currentPoint, targetPoint);
-            double score = pointMap.get(target) - distance; // Balance points vs distance
+            saveDebugImage(gray, debugPrefix + "_processed", detectedMarkers.size());
             
-            if (score > maxScore) {
-                maxScore = score;
-                bestTarget = target;
+            Dictionary dictionary = Aruco.getPredefinedDictionary(Aruco.DICT_5X5_250);
+            List<Mat> corners = new ArrayList<>();
+            Mat ids = new Mat();
+            
+            //detect param
+            DetectorParameters parameters = DetectorParameters.create();
+            parameters.setAdaptiveThreshWinSizeMin(3);
+            parameters.setAdaptiveThreshWinSizeMax(23);
+            parameters.setAdaptiveThreshWinSizeStep(10);
+            parameters.setMinMarkerPerimeterRate(0.03);
+            parameters.setMaxMarkerPerimeterRate(0.5);
+            
+            Aruco.detectMarkers(gray, dictionary, corners, ids, parameters, new Mat(), cameraMatrix, distCoeffs);
+            
+            if (!ids.empty()) {
+                // Draw markers for debug image
+                Mat debugImage = image.clone();
+                Aruco.drawDetectedMarkers(debugImage, corners, ids);
+                saveDebugImage(debugImage, debugPrefix + "_detected", detectedMarkers.size());
+                
+                for (int i = 0; i < ids.rows(); i++) {
+                    detectedMarkers.add((int) ids.get(i, 0)[0]);
+                }
+            }
+
+            //clear
+            gray.release();
+            cameraMatrix.release();
+            distCoeffs.release();
+            ids.release();
+            for (Mat corner : corners) {
+                corner.release();
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return detectedMarkers;
+    }
+
+    //mt to identify items based on AR markers
+    private String identifyItem(List<Integer> markers) {
+        if (!markers.isEmpty()) {
+            Integer markerId = markers.get(0);
+            return markerToItem.getOrDefault(markerId, "unknown");
+        }
+        return "unknown";
+    }
+
+    @Override
+    protected void runPlan1() {
+        api.startMission();
+
+        //init path planning
+        List<Point> currentPath = new ArrayList<>();
+        currentPath.add(startPoint);
+
+        //1.move through safe waypoints to start position
+        for (Point waypoint : safeWaypoints) {
+            if (isPointSafe(waypoint)) {
+                moveToWithRetry(waypoint, startQuaternion);
             }
         }
 
-        return bestTarget;
+        //2.Patrol each area using safe paths
+        for (int i = 0; i < areaPoints.length; i++) {
+            Point targetPoint = areaPoints[i];
+            
+            //check if direct path is safe, otherwise use waypoints
+            if (!isPathSafe(api.getRobotKinematics().getPosition(), targetPoint)) {
+                Point safePoint = findNearestSafeWaypoint(targetPoint);
+                moveToWithRetry(safePoint, startQuaternion);
+            }
+            
+            //move to scanning position if it's safe
+            if (isPointSafe(targetPoint)) {
+                Quaternion scanQuaternion = createScanningQuaternion(targetPoint);
+                moveToWithRetry(targetPoint, scanQuaternion);
+                
+                scanArea(i, targetPoint, scanQuaternion);
+            }
+        }
+
+        //3.move to astronaut position
+        Point safeAstronautApproach = findSafeApproachPoint(astronautPoint);
+        moveToWithRetry(safeAstronautApproach, astronautQuaternion);
+        moveToWithRetry(astronautPoint, astronautQuaternion);
+        
+        api.reportRoundingCompletion();
+
+        completeTargetOperation();
     }
 
+    //helper mt for safety and navigation (KOZ & KIZ)
 
+    private boolean isPointSafe(Point p) {
+        boolean inKiz = isPointInBounds(p, KIZ1_BOUNDS) || isPointInBounds(p, KIZ2_BOUNDS);
+        if (!inKiz) return false;
+
+        for (double[] koz : KOZ_BOUNDS) {
+            if (isPointInBounds(p, koz)) return false;
+        }
+        return true;
+    }
+
+    private boolean isPointInBounds(Point p, double[] bounds) {
+        return p.getX() >= bounds[0] && p.getX() <= bounds[3] &&
+               p.getY() >= bounds[1] && p.getY() <= bounds[4] &&
+               p.getZ() >= bounds[2] && p.getZ() <= bounds[5];
+    }
+
+    private boolean isPathSafe(Point start, Point end) {
+        if (!isValidDistance(start, end)) {
+            return false;
+        }
+
+        //calculate required acceleration
+        double distance = distance(start, end);
+        double timeRequired = distance / MAX_VELOCITY;
+        double acceleration = (2 * distance) / (timeRequired * timeRequired);
+        double force = ROBOT_MASS * acceleration;
+        
+        if (force > MAX_THRUST_X) {
+            return false;
+        }
+
+        //check path points
+        int steps = 10;
+        for (int i = 0; i <= steps; i++) {
+            double t = i / (double) steps;
+            Point p = new Point(
+                start.getX() + t * (end.getX() - start.getX()),
+                start.getY() + t * (end.getY() - start.getY()),
+                start.getZ() + t * (end.getZ() - start.getZ())
+            );
+            if (!isPointSafe(p)) return false;
+        }
+        return true;
+    }
+
+    private Point findNearestSafeWaypoint(Point target) {
+        Point nearest = safeWaypoints[0];
+        double minDist = Double.MAX_VALUE;
+        
+        for (Point waypoint : safeWaypoints) {
+            if (isPointSafe(waypoint)) {
+                double dist = distance(waypoint, target);
+                if (dist < minDist) {
+                    minDist = dist;
+                    nearest = waypoint;
+                }
+            }
+        }
+        return nearest;
+    }
+
+    private double distance(Point p1, Point p2) {
+        double dx = p1.getX() - p2.getX();
+        double dy = p1.getY() - p2.getY();
+        double dz = p1.getZ() - p2.getZ();
+        return Math.sqrt(dx*dx + dy*dy + dz*dz);
+    }
+
+    private Point findSafeApproachPoint(Point target) {
+        //find a safe point slightly before the target
+        double offset = 0.3; //30cm offset
+        Point approach = new Point(
+            target.getX() - offset,
+            target.getY(),
+            target.getZ()
+        );
+        return isPointSafe(approach) ? approach : findNearestSafeWaypoint(target);
+    }
+
+    //enhanced scanning with relative movement
+    private void scanArea(int areaIndex, Point targetPoint, Quaternion baseQuaternion) {
+        boolean itemFound = false;
+        float[] angles = {0f, -15f, 15f, -30f, 30f};
+        Point correctedPoint = getCorrectedPointForNavCam(targetPoint);
+        
+        for (float angle : angles) {
+            if (itemFound) break;
+            
+            Quaternion rotatedQuat = adjustQuaternionByDegrees(baseQuaternion, angle);
+            
+            if (isPointSafe(targetPoint) && 
+                isValidRotation(api.getRobotKinematics().getOrientation(), rotatedQuat)) {
+                
+                //try relative movement first
+                Point relativePoint = new Point(0.1, 0, 0); //small forward movement
+                api.relativeMoveTo(relativePoint, rotatedQuat, true);
+                
+                //wait for stabilization
+                try {
+                    Thread.sleep(1000);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                
+                for (int attempt = 0; attempt < 3 && !itemFound; attempt++) {
+                    Mat image = api.getMatNavCam();
+                    List<Integer> markers = detectArUcoMarkers(image, 
+                        String.format("area_%d_angle_%d_attempt_%d", areaIndex, (int)angle, attempt));
+                    
+                    if (!markers.isEmpty()) {
+                        String detectedItem = identifyItem(markers);
+                        if (!"unknown".equals(detectedItem)) {
+                            api.setAreaInfo(areaIndex + 1, detectedItem, 1);
+                            foundItemsMap.put(areaIndex + 1, detectedItem);
+                            itemFound = true;
+                            
+                            //save successful detection image
+                            saveDebugImage(image, String.format("success_area_%d_%s", areaIndex, detectedItem), 0);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private void completeTargetOperation() {
+        String targetItem = "unknown";
+        Point correctedAstronautPoint = getCorrectedPointForNavCam(astronautPoint);
+        
+        //move to position for astronaut QR reading
+        moveToWithRetry(correctedAstronautPoint, astronautQuaternion);
+        
+        for (int attempt = 0; attempt < 5 && "unknown".equals(targetItem); attempt++) {
+            Mat astronautImage = api.getMatNavCam();
+            List<Integer> targetMarkers = detectArUcoMarkers(astronautImage, 
+                String.format("astronaut_target_attempt_%d", attempt));
+            targetItem = identifyItem(targetMarkers);
+            
+            if (!"unknown".equals(targetItem)) {
+                saveDebugImage(astronautImage, "target_item_detected", attempt);
+            }
+        }
+        
+        //notify target recognition
+        api.notifyRecognitionItem();
+
+        if (targetAreaId != -1) {
+            Point targetPoint = areaPoints[targetAreaId - 1];
+            Point correctedTargetPoint = getCorrectedPointForNavCam(targetPoint);
+            
+            if (isPointSafe(targetPoint)) {
+                Quaternion targetQuaternion = createScanningQuaternion(targetPoint);
+                moveToWithRetry(correctedTargetPoint, targetQuaternion);
+                
+                //take final snapshot
+                Mat finalImage = api.getMatNavCam();
+                saveDebugImage(finalImage, "final_target", 0);
+                api.takeTargetItemSnapshot();
+            }
+        }
+    }
+
+    //helper mt to create scanning quaternion based on position
+    private Quaternion createScanningQuaternion(Point target) {
+        //calc direction to face the target
+        float yaw = (float) Math.atan2(target.getY() - startPoint.getY(), 
+                                     target.getX() - startPoint.getX());
+        return new Quaternion(0f, 0f, (float) Math.sin(yaw/2), (float) Math.cos(yaw/2));
+    }
+
+    //helper mt to adjust quaternion by degrees
+    private Quaternion adjustQuaternionByDegrees(Quaternion base, float degrees) {
+        float radians = (float) Math.toRadians(degrees);
+        float sin = (float) Math.sin(radians/2);
+        float cos = (float) Math.cos(radians/2);
+        return new Quaternion(
+            base.getX()*cos - base.getY()*sin,
+            base.getX()*sin + base.getY()*cos,
+            base.getZ(),
+            base.getW()
+        );
+    }
+
+    //helper mtto handle movement with retry logic
+    private void moveToWithRetry(Point point, Quaternion quaternion) {
+        int maxRetries = 3;
+        int retryCount = 0;
+        boolean success = false;
+        
+        while (!success && retryCount < maxRetries) {
+            try {
+                api.moveTo(point, quaternion, false);
+                success = true;
+            } catch (Exception e) {
+                retryCount++;
+                if (retryCount >= maxRetries) {
+                    throw e;
+                }
+            }
+        }
+    }
+
+    //helper mt to check if movement distance is valid
+    private boolean isValidDistance(Point p1, Point p2) {
+        double dist = distance(p1, p2);
+        return dist >= MIN_DISTANCE;
+    }
+
+    //helper mt to check if rotation angle is valid
+    private boolean isValidRotation(Quaternion q1, Quaternion q2) {
+        //convert quaternion difference to angle
+        double dotProduct = q1.getX()*q2.getX() + q1.getY()*q2.getY() + 
+                          q1.getZ()*q2.getZ() + q1.getW()*q2.getW();
+        double angle = Math.toDegrees(2 * Math.acos(Math.abs(dotProduct)));
+        return angle >= MIN_ANGLE;
+    }
+
+    //moveToWithRetry with speed control and minimum movement checks
+    private void moveToWithRetry(Point targetPoint, Quaternion targetQuaternion) {
+        int maxRetries = 3;
+        int retryCount = 0;
+        boolean success = false;
+        
+        Point currentPosition = api.getRobotKinematics().getPosition();
+        Quaternion currentQuaternion = api.getRobotKinematics().getOrientation();
+
+        //check if movement is necessary
+        if (!isValidDistance(currentPosition, targetPoint) && 
+            !isValidRotation(currentQuaternion, targetQuaternion)) {
+            return; //mvement too small, skip
+        }
+
+        while (!success && retryCount < maxRetries) {
+            try {
+                //calc movement time based on distance and max velocity
+                double distance = distance(currentPosition, targetPoint);
+                double moveTime = distance / MAX_VELOCITY;
+
+                //movement param
+                api.moveTo(targetPoint, targetQuaternion, true); //true for speed control
+                success = true;
+
+                //wait for movement to complete / obstacle detection
+                int timeoutMs = (int)(moveTime * 1000) + 1000; //1 sec buffer
+                api.waitForMotion(timeoutMs);
+
+            } catch (Exception e) {
+                retryCount++;
+                if (retryCount >= maxRetries) {
+                    throw e;
+                }
+                //wait before retry
+                try {
+                    Thread.sleep(1000);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        }
+    }
+
+    @Override
+    protected void runPlan2() {
+        // Not used in preliminary round
+    }
+
+    @Override
+    protected void runPlan3() {
+        // Not used in preliminary round
+    }
 }
