@@ -7,7 +7,9 @@ import org.opencv.core.*;
 import org.opencv.imgproc.Imgproc;
 import org.opencv.aruco.Aruco;
 import org.opencv.aruco.Dictionary;
+import org.opencv.aruco.DetectorParameters;
 import java.util.*;
+import java.util.concurrent.*;
 
 /**
  * class meant to handle commands from the Ground Data System and execute them in Astrobee.
@@ -77,150 +79,250 @@ public class YourService extends KiboRpcService {
         put(10, "goggle");
     }};
 
-    //camera offsets from center point
+    // Camera offsets and parameters
     private static final double[] NAV_CAM_OFFSET = {0.1177, -0.0422, -0.0826};
     private static final double[] HAZ_CAM_OFFSET = {0.1328, 0.0362, -0.0826};
+    private Mat cameraMatrix;
+    private Mat distCoeffs;
 
-    //mt to get corrected point for NavCam view
-    private Point getCorrectedPointForNavCam(Point target) {
-        return new Point(
-            target.getX() - NAV_CAM_OFFSET[0],
-            target.getY() - NAV_CAM_OFFSET[1],
-            target.getZ() - NAV_CAM_OFFSET[2]
-        );
-    }
+    // Cache for optimization
+    private final Map<String, Mat> imageCache = new ConcurrentHashMap<>();
+    private final Map<Integer, Long> lastDetectionTime = new ConcurrentHashMap<>();
+    private static final long DETECTION_COOLDOWN = 500; // ms
 
-    //mt to process and save debug images
-    private void saveDebugImage(Mat image, String prefix, int counter) {
+    // Thread management
+    private final ExecutorService executor = Executors.newFixedThreadPool(2);
+    private final CompletableFuture<Void> imageProcessingFuture = new CompletableFuture<>();
+
+    @Override
+    protected void runPlan1() {
         try {
-            String filename = String.format("%s_%d.png", prefix, counter);
-            saveMatImage(image, filename);
+            initializeCameraParameters();
+            api.startMission();
+            executeMainMission();
         } catch (Exception e) {
             e.printStackTrace();
+            handleMissionFailure();
+        } finally {
+            cleanup();
         }
     }
 
-    //AR marker detection with debug
-    private List<Integer> detectArUcoMarkers(Mat image, String debugPrefix) {
-        List<Integer> detectedMarkers = new ArrayList<>();
+    private void initializeCameraParameters() {
+        double[][] camParams = api.getNavCamIntrinsics();
+        cameraMatrix = new Mat(3, 3, CvType.CV_64F);
+        distCoeffs = new Mat(1, 5, CvType.CV_64F);
+        
+        for (int i = 0; i < 3; i++) {
+            for (int j = 0; j < 3; j++) {
+                cameraMatrix.put(i, j, camParams[0][i * 3 + j]);
+            }
+        }
+        for (int i = 0; i < 5; i++) {
+            distCoeffs.put(0, i, camParams[1][i]);
+        }
+    }
+
+    private void executeMainMission() {
         try {
-            Mat gray = new Mat();
-            Imgproc.cvtColor(image, gray, Imgproc.COLOR_BGR2GRAY);
-            
-            //get NavCam intrinsics
-            double[][] camParams = api.getNavCamIntrinsics();
-            Mat cameraMatrix = new Mat(3, 3, CvType.CV_64F);
-            Mat distCoeffs = new Mat(1, 5, CvType.CV_64F);
-            
-            //set camera matrix
-            for (int i = 0; i < 3; i++) {
-                for (int j = 0; j < 3; j++) {
-                    cameraMatrix.put(i, j, camParams[0][i * 3 + j]);
+            // First thread: Movement and navigation
+            CompletableFuture<Void> navigationFuture = CompletableFuture.runAsync(() -> {
+                moveToWithRetry(startPoint, startQuaternion);
+            }, executor);
+
+            // Second thread: Image processing preparation
+            CompletableFuture<DetectorParameters> detectionFuture = CompletableFuture.supplyAsync(() -> {
+                return createOptimizedDetectorParameters();
+            }, executor);
+
+            // Wait for initial setup to complete
+            navigationFuture.join();
+            DetectorParameters parameters = detectionFuture.get();
+
+            // Main mission execution with two threads
+            for (int i = 0; i < areaPoints.length; i++) {
+                final int areaIndex = i;
+                
+                // Thread 1: Movement and positioning
+                CompletableFuture<Void> movementFuture = CompletableFuture.runAsync(() -> {
+                    Point targetPoint = areaPoints[areaIndex];
+                    if (!isPointSafe(targetPoint)) {
+                        targetPoint = findNearestSafePoint(targetPoint);
+                    }
+                    moveToWithRetry(targetPoint, createScanningQuaternion(targetPoint));
+                }, executor);
+
+                // Thread 2: Image processing
+                CompletableFuture<Boolean> processingFuture = CompletableFuture.supplyAsync(() -> {
+                    return scanAreaOptimized(areaIndex, parameters);
+                }, executor);
+
+                // Wait for both operations to complete before moving to next area
+                movementFuture.join();
+                if (processingFuture.get()) {
+                    // Item found, continue to next area
+                    continue;
                 }
             }
-            //set distortion coefficients
-            for (int i = 0; i < 5; i++) {
-                distCoeffs.put(0, i, camParams[1][i]);
+
+            // Final phase with astronaut
+            completeTargetOperationOptimized();
+        } catch (Exception e) {
+            e.printStackTrace();
+            handleMissionFailure();
+        } finally {
+            executor.shutdown();
+            try {
+                // Wait for threads to complete with timeout
+                if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+                    executor.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                executor.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    private DetectorParameters createOptimizedDetectorParameters() {
+        DetectorParameters parameters = DetectorParameters.create();
+        parameters.setAdaptiveThreshWinSizeMin(3);
+        parameters.setAdaptiveThreshWinSizeMax(23);
+        parameters.setAdaptiveThreshWinSizeStep(10);
+        parameters.setMinMarkerPerimeterRate(0.03);
+        parameters.setMaxMarkerPerimeterRate(0.5);
+        parameters.setPolygonalApproxAccuracyRate(0.05);
+        parameters.setMinCornerDistanceRate(0.05);
+        parameters.setMinDistanceToBorder(3);
+        return parameters;
+    }
+
+    private boolean scanAreaOptimized(int areaIndex, DetectorParameters parameters) {
+        float[] angles = calculateOptimalScanAngles(areaPoints[areaIndex]);
+        
+        for (float angle : angles) {
+            // Movement in main thread
+            Quaternion rotatedQuat = adjustQuaternionByDegrees(
+                createScanningQuaternion(areaPoints[areaIndex]), 
+                angle
+            );
+            
+            if (!isValidMovement(areaPoints[areaIndex], rotatedQuat)) {
+                continue;
             }
 
-            //enhance image
-            Imgproc.GaussianBlur(gray, gray, new Size(5, 5), 0);
-            Imgproc.adaptiveThreshold(gray, gray, 255,
-                    Imgproc.ADAPTIVE_THRESH_GAUSSIAN_C,
-                    Imgproc.THRESH_BINARY, 11, 2);
+            try {
+                // Image processing in second thread
+                CompletableFuture<Boolean> detectionFuture = CompletableFuture.supplyAsync(() -> {
+                    return processImagesOptimized(areaIndex, parameters);
+                }, executor);
 
-            saveDebugImage(gray, debugPrefix + "_processed", detectedMarkers.size());
-            
+                // Wait with timeout
+                if (detectionFuture.get(3, TimeUnit.SECONDS)) {
+                    return true;
+                }
+            } catch (TimeoutException te) {
+                // Handle timeout
+                continue;
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+        return false;
+    }
+
+    private float[] calculateOptimalScanAngles(Point target) {
+        // Calculate optimal scanning angles based on target position
+        double baseAngle = Math.toDegrees(Math.atan2(
+            target.getY() - startPoint.getY(),
+            target.getX() - startPoint.getX()
+        ));
+        
+        return new float[]{
+            0f,
+            (float)(baseAngle - 15),
+            (float)(baseAngle + 15),
+            (float)(baseAngle - 30),
+            (float)(baseAngle + 30)
+        };
+    }
+
+    private boolean processImagesOptimized(int areaIndex, DetectorParameters parameters) {
+        Mat image = api.getMatNavCam();
+        String cacheKey = "area_" + areaIndex;
+        
+        // Cache processed grayscale image
+        Mat gray = imageCache.computeIfAbsent(cacheKey, k -> new Mat());
+        Imgproc.cvtColor(image, gray, Imgproc.COLOR_BGR2GRAY);
+        
+        // Enhanced image processing
+        Imgproc.GaussianBlur(gray, gray, new Size(5, 5), 0);
+        Imgproc.adaptiveThreshold(gray, gray, 255,
+                Imgproc.ADAPTIVE_THRESH_GAUSSIAN_C,
+                Imgproc.THRESH_BINARY, 11, 2);
+
+        List<Integer> markers = detectMarkersOptimized(gray, parameters);
+        
+        if (!markers.isEmpty()) {
+            String detectedItem = identifyItem(markers);
+            if (!"unknown".equals(detectedItem)) {
+                api.setAreaInfo(areaIndex + 1, detectedItem, 1);
+                foundItemsMap.put(areaIndex + 1, detectedItem);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private List<Integer> detectMarkersOptimized(Mat gray, DetectorParameters parameters) {
+        List<Integer> detectedMarkers = new ArrayList<>();
+        List<Mat> corners = new ArrayList<>();
+        Mat ids = new Mat();
+
+        try {
             Dictionary dictionary = Aruco.getPredefinedDictionary(Aruco.DICT_5X5_250);
-            List<Mat> corners = new ArrayList<>();
-            Mat ids = new Mat();
-            
-            //detect param
-            DetectorParameters parameters = DetectorParameters.create();
-            parameters.setAdaptiveThreshWinSizeMin(3);
-            parameters.setAdaptiveThreshWinSizeMax(23);
-            parameters.setAdaptiveThreshWinSizeStep(10);
-            parameters.setMinMarkerPerimeterRate(0.03);
-            parameters.setMaxMarkerPerimeterRate(0.5);
-            
             Aruco.detectMarkers(gray, dictionary, corners, ids, parameters, new Mat(), cameraMatrix, distCoeffs);
             
             if (!ids.empty()) {
-                // Draw markers for debug image
-                Mat debugImage = image.clone();
-                Aruco.drawDetectedMarkers(debugImage, corners, ids);
-                saveDebugImage(debugImage, debugPrefix + "_detected", detectedMarkers.size());
-                
                 for (int i = 0; i < ids.rows(); i++) {
                     detectedMarkers.add((int) ids.get(i, 0)[0]);
                 }
             }
-
-            //clear
-            gray.release();
-            cameraMatrix.release();
-            distCoeffs.release();
+        } finally {
             ids.release();
-            for (Mat corner : corners) {
-                corner.release();
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
+            corners.forEach(Mat::release);
         }
+        
         return detectedMarkers;
     }
 
-    //mt to identify items based on AR markers
-    private String identifyItem(List<Integer> markers) {
-        if (!markers.isEmpty()) {
-            Integer markerId = markers.get(0);
-            return markerToItem.getOrDefault(markerId, "unknown");
-        }
-        return "unknown";
+    private void handleMissionFailure() {
+        // Log error state
+        Point currentPos = api.getRobotKinematics().getPosition();
+        Quaternion currentQuat = api.getRobotKinematics().getOrientation();
+        
+        // Try to move to safe position
+        Point safePoint = findNearestSafePoint(currentPos);
+        moveToWithRetry(safePoint, currentQuat);
     }
 
-    @Override
-    protected void runPlan1() {
-        api.startMission();
-
-        //init path planning
-        List<Point> currentPath = new ArrayList<>();
-        currentPath.add(startPoint);
-
-        //1.move through safe waypoints to start position
-        for (Point waypoint : safeWaypoints) {
-            if (isPointSafe(waypoint)) {
-                moveToWithRetry(waypoint, startQuaternion);
-            }
-        }
-
-        //2.Patrol each area using safe paths
-        for (int i = 0; i < areaPoints.length; i++) {
-            Point targetPoint = areaPoints[i];
-            
-            //check if direct path is safe, otherwise use waypoints
-            if (!isPathSafe(api.getRobotKinematics().getPosition(), targetPoint)) {
-                Point safePoint = findNearestSafeWaypoint(targetPoint);
-                moveToWithRetry(safePoint, startQuaternion);
-            }
-            
-            //move to scanning position if it's safe
-            if (isPointSafe(targetPoint)) {
-                Quaternion scanQuaternion = createScanningQuaternion(targetPoint);
-                moveToWithRetry(targetPoint, scanQuaternion);
-                
-                scanArea(i, targetPoint, scanQuaternion);
-            }
-        }
-
-        //3.move to astronaut position
-        Point safeAstronautApproach = findSafeApproachPoint(astronautPoint);
-        moveToWithRetry(safeAstronautApproach, astronautQuaternion);
-        moveToWithRetry(astronautPoint, astronautQuaternion);
+    private void cleanup() {
+        // Release OpenCV resources
+        if (cameraMatrix != null) cameraMatrix.release();
+        if (distCoeffs != null) distCoeffs.release();
         
-        api.reportRoundingCompletion();
-
-        completeTargetOperation();
+        // Clear caches
+        imageCache.values().forEach(Mat::release);
+        imageCache.clear();
+        lastDetectionTime.clear();
+        
+        // Ensure executor is shutdown
+        if (!executor.isShutdown()) {
+            executor.shutdownNow();
+        }
+        
+        // Shutdown API
+        api.shutdownFactory();
     }
 
     //helper mt for safety and navigation (KOZ & KIZ)
