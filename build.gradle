@@ -2,6 +2,8 @@
 
 buildscript {
     repositories {
+        google()
+        mavenCentral()
         jcenter()
         maven {
             url 'https://maven.google.com/'
@@ -18,15 +20,12 @@ buildscript {
 
 allprojects {
     repositories {
-        maven {
-            url "https://github.com/rosjava/rosjava_mvn_repo/raw/master"
-        }
+        google()
+        mavenCentral()
+        maven { url "https://github.com/rosjava/rosjava_mvn_repo/raw/master" }
         jcenter()
-        maven {
-            url 'https://maven.google.com/'
-            name 'Google'
-        }
-        maven { url "https://jitpack.io" }
+        maven { url "https://repo1.maven.org/maven2/" }
+        maven { url "https://repository.springsource.com/maven/bundles/external" }
     }
 }
 

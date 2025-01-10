@@ -1,18 +1,30 @@
 apply plugin: 'com.android.application'
 
+repositories {
+    mavenCentral()
+    maven { url 'https://jitpack.io' }
+    maven { url "https://dl.google.com/dl/android/maven2/" }
+    maven { url 'https://raw.github.com/rosjava/rosjava_mvn_repo/master' }
+}
 
 android {
     compileSdkVersion 26
     buildToolsVersion "28.0.3"
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
     defaultConfig {
-        applicationId "jp.jaxa.iss.kibo.rpc.flyoverspace" +
-                ""
+        applicationId "jp.jaxa.iss.kibo.rpc.flyoverspace"
         minSdkVersion 24
         targetSdkVersion 26
         versionCode 1
         versionName "1.0"
         testInstrumentationRunner "android.support.test.runner.AndroidJUnitRunner"
-        multiDexEnabled  true
+        multiDexEnabled true
+        ndk {
+            abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'
+        }
     }
     buildTypes {
         release {
@@ -32,9 +44,15 @@ android {
         exclude 'META-INF/dependencies.txt'
         exclude 'META-INF/LGPL2.1'
     }
-    compileOptions {
-        sourceCompatibility = 1.8
-        targetCompatibility = 1.8
+    sourceSets {
+        main {
+            jniLibs.srcDirs = ['src/main/jniLibs']
+        }
+    }
+    lintOptions {
+        abortOnError false
+        disable 'InvalidPackage'
+        ignore 'InvalidPackage'
     }
 }
 
@@ -45,13 +63,30 @@ dependencies {
     compile 'com.android.support:appcompat-v7:26.+'
     compile 'com.android.support.constraint:constraint-layout:1.0.2'
     compile('org.ros.rosjava_core:rosjava:[0.2,0.3)') {
+        exclude group: 'org.apache.commons'
         exclude group: 'xml-apis'
         exclude group: 'junit'
     }
     compile('org.ros.android_core:android_10:[0.2,0.3)') {
+        exclude group: 'org.apache.commons'
         exclude group: 'xml-apis'
         exclude group: 'junit'
     }
     testCompile 'junit:junit:4.12'
-    compile 'com.quickbirdstudios:opencv-contrib:4.5.3.0'
+
+    // OpenCV dependencies - using a simpler version
+    implementation 'org.bytedeco:javacv:1.4.4'
+    implementation 'org.bytedeco:javacpp:1.4.4'
+    implementation 'org.bytedeco.javacpp-presets:opencv:3.4.3-1.4.4'
+    implementation 'org.bytedeco.javacpp-presets:opencv:3.4.3-1.4.4:android-arm'
+    implementation 'org.bytedeco.javacpp-presets:opencv:3.4.3-1.4.4:android-x86'
+
+    implementation 'commons-logging:commons-logging:1.2'
+    implementation 'commons-net:commons-net:3.9.0'
+    implementation 'commons-httpclient:commons-httpclient:3.1'
+    implementation 'commons-codec:commons-codec:1.15'
+    implementation 'commons-io:commons-io:2.11.0'
+    implementation 'commons-lang:commons-lang:2.6'
+
+
 }

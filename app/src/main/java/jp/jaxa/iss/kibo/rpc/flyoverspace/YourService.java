@@ -1,4 +1,4 @@
-package jp.jaxa.iss.kibo.rpc.sampleapk;
+package jp.jaxa.iss.kibo.rpc.flyoverspace;
 
 import jp.jaxa.iss.kibo.rpc.api.KiboRpcService;
 import gov.nasa.arc.astrobee.types.Point;
@@ -98,7 +98,6 @@ public class YourService extends KiboRpcService {
     protected void runPlan1() {
         try {
             initializeCameraParameters();
-            api.startMission();
             executeMainMission();
         } catch (Exception e) {
             e.printStackTrace();
@@ -125,21 +124,25 @@ public class YourService extends KiboRpcService {
 
     private void executeMainMission() {
         try {
+            // Start mission
+            api.startMission();
+
             // First thread: Movement and navigation
             CompletableFuture<Void> navigationFuture = CompletableFuture.runAsync(() -> {
                 moveToWithRetry(startPoint, startQuaternion);
             }, executor);
 
             // Second thread: Image processing preparation
-            CompletableFuture<DetectorParameters> detectionFuture = CompletableFuture.supplyAsync(() -> {
-                return createOptimizedDetectorParameters();
+            CompletableFuture<Void> detectionFuture = CompletableFuture.runAsync(() -> {
+                // Inisialisasi kamera dan parameter deteksi
+                initializeCameraParameters();
             }, executor);
 
             // Wait for initial setup to complete
             navigationFuture.join();
-            DetectorParameters parameters = detectionFuture.get();
+            detectionFuture.join();
 
-            // Main mission execution with two threads
+            // Main scanning loop
             for (int i = 0; i < areaPoints.length; i++) {
                 final int areaIndex = i;
                 
@@ -154,46 +157,32 @@ public class YourService extends KiboRpcService {
 
                 // Thread 2: Image processing
                 CompletableFuture<Boolean> processingFuture = CompletableFuture.supplyAsync(() -> {
-                    return scanAreaOptimized(areaIndex, parameters);
+                    return scanAreaOptimized(areaIndex, null); // Tidak perlu DetectorParameters
                 }, executor);
 
-                // Wait for both operations to complete before moving to next area
+                // Wait for both operations to complete
                 movementFuture.join();
                 if (processingFuture.get()) {
-                    // Item found, continue to next area
                     continue;
                 }
             }
 
-            // Final phase with astronaut
+            // Final phase - astronaut target
             completeTargetOperationOptimized();
+            
+            // Report completion
+            api.reportRoundingCompletion();
+
         } catch (Exception e) {
             e.printStackTrace();
             handleMissionFailure();
         } finally {
-            executor.shutdown();
-            try {
-                // Wait for threads to complete with timeout
-                if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
-                    executor.shutdownNow();
-                }
-            } catch (InterruptedException e) {
-                executor.shutdownNow();
-                Thread.currentThread().interrupt();
-            }
+            cleanup();
         }
     }
 
     private DetectorParameters createOptimizedDetectorParameters() {
         DetectorParameters parameters = DetectorParameters.create();
-        parameters.setAdaptiveThreshWinSizeMin(3);
-        parameters.setAdaptiveThreshWinSizeMax(23);
-        parameters.setAdaptiveThreshWinSizeStep(10);
-        parameters.setMinMarkerPerimeterRate(0.03);
-        parameters.setMaxMarkerPerimeterRate(0.5);
-        parameters.setPolygonalApproxAccuracyRate(0.05);
-        parameters.setMinCornerDistanceRate(0.05);
-        parameters.setMinDistanceToBorder(3);
         return parameters;
     }
 
@@ -201,7 +190,6 @@ public class YourService extends KiboRpcService {
         float[] angles = calculateOptimalScanAngles(areaPoints[areaIndex]);
         
         for (float angle : angles) {
-            // Movement in main thread
             Quaternion rotatedQuat = adjustQuaternionByDegrees(
                 createScanningQuaternion(areaPoints[areaIndex]), 
                 angle
@@ -212,17 +200,20 @@ public class YourService extends KiboRpcService {
             }
 
             try {
-                // Image processing in second thread
+                // Menggunakan CompletableFuture dengan timeout yang lebih pendek
                 CompletableFuture<Boolean> detectionFuture = CompletableFuture.supplyAsync(() -> {
                     return processImagesOptimized(areaIndex, parameters);
                 }, executor);
 
-                // Wait with timeout
-                if (detectionFuture.get(3, TimeUnit.SECONDS)) {
+                // Menunggu hasil dengan timeout 2 detik
+                if (detectionFuture.get(2, TimeUnit.SECONDS)) {
+                    // Simpan gambar debug jika item ditemukan
+                    Mat image = api.getMatNavCam();
+                    api.saveMatImage(image, "found_item_area_" + (areaIndex + 1));
                     return true;
                 }
             } catch (TimeoutException te) {
-                // Handle timeout
+                // Log timeout dan lanjutkan ke sudut berikutnya
                 continue;
             } catch (Exception e) {
                 e.printStackTrace();
@@ -257,11 +248,12 @@ public class YourService extends KiboRpcService {
         
         // Enhanced image processing
         Imgproc.GaussianBlur(gray, gray, new Size(5, 5), 0);
-        Imgproc.adaptiveThreshold(gray, gray, 255,
-                Imgproc.ADAPTIVE_THRESH_GAUSSIAN_C,
-                Imgproc.THRESH_BINARY, 11, 2);
+        
+        // Menggunakan threshold yang lebih sederhana
+        Imgproc.threshold(gray, gray, 127, 255, Imgproc.THRESH_BINARY);
 
-        List<Integer> markers = detectMarkersOptimized(gray, parameters);
+        // Menggunakan fungsi deteksi yang sudah diperbaiki
+        List<Integer> markers = detectArUcoMarkers(gray, "area_" + areaIndex);
         
         if (!markers.isEmpty()) {
             String detectedItem = identifyItem(markers);
@@ -281,12 +273,19 @@ public class YourService extends KiboRpcService {
 
         try {
             Dictionary dictionary = Aruco.getPredefinedDictionary(Aruco.DICT_5X5_250);
-            Aruco.detectMarkers(gray, dictionary, corners, ids, parameters, new Mat(), cameraMatrix, distCoeffs);
+            // Menggunakan overload yang benar untuk detectMarkers
+            Aruco.detectMarkers(
+                gray,              // input image
+                dictionary,        // dictionary
+                corners,          // output corners
+                ids              // output ids
+            );
             
             if (!ids.empty()) {
                 for (int i = 0; i < ids.rows(); i++) {
                     detectedMarkers.add((int) ids.get(i, 0)[0]);
                 }
+
             }
         } finally {
             ids.release();
@@ -297,11 +296,8 @@ public class YourService extends KiboRpcService {
     }
 
     private void handleMissionFailure() {
-        // Log error state
         Point currentPos = api.getRobotKinematics().getPosition();
         Quaternion currentQuat = api.getRobotKinematics().getOrientation();
-        
-        // Try to move to safe position
         Point safePoint = findNearestSafePoint(currentPos);
         moveToWithRetry(safePoint, currentQuat);
     }
@@ -512,19 +508,44 @@ public class YourService extends KiboRpcService {
     }
 
     //helper mtto handle movement with retry logic
-    private void moveToWithRetry(Point point, Quaternion quaternion) {
+    private void moveToWithRetry(Point targetPoint, Quaternion targetQuaternion) {
         int maxRetries = 3;
         int retryCount = 0;
         boolean success = false;
         
+        Point currentPosition = api.getRobotKinematics().getPosition();
+        Quaternion currentQuaternion = api.getRobotKinematics().getOrientation();
+
+        if (!isValidDistance(currentPosition, targetPoint) && 
+            !isValidRotation(currentQuaternion, targetQuaternion)) {
+            return;
+        }
+
         while (!success && retryCount < maxRetries) {
             try {
-                api.moveTo(point, quaternion, false);
+                double distance = distance(currentPosition, targetPoint);
+                double moveTime = distance / MAX_VELOCITY;
+
+                // Use moveTo with position printing
+                api.moveTo(targetPoint, targetQuaternion, true);
                 success = true;
+
+                // Use simple delay instead of waitForMotion
+                try {
+                    Thread.sleep((long)(moveTime * 1000) + 1000);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                }
+
             } catch (Exception e) {
                 retryCount++;
                 if (retryCount >= maxRetries) {
                     throw e;
+                }
+                try {
+                    Thread.sleep(1000);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
                 }
             }
         }
@@ -545,50 +566,6 @@ public class YourService extends KiboRpcService {
         return angle >= MIN_ANGLE;
     }
 
-    //moveToWithRetry with speed control and minimum movement checks
-    private void moveToWithRetry(Point targetPoint, Quaternion targetQuaternion) {
-        int maxRetries = 3;
-        int retryCount = 0;
-        boolean success = false;
-        
-        Point currentPosition = api.getRobotKinematics().getPosition();
-        Quaternion currentQuaternion = api.getRobotKinematics().getOrientation();
-
-        //check if movement is necessary
-        if (!isValidDistance(currentPosition, targetPoint) && 
-            !isValidRotation(currentQuaternion, targetQuaternion)) {
-            return; //mvement too small, skip
-        }
-
-        while (!success && retryCount < maxRetries) {
-            try {
-                //calc movement time based on distance and max velocity
-                double distance = distance(currentPosition, targetPoint);
-                double moveTime = distance / MAX_VELOCITY;
-
-                //movement param
-                api.moveTo(targetPoint, targetQuaternion, true); //true for speed control
-                success = true;
-
-                //wait for movement to complete / obstacle detection
-                int timeoutMs = (int)(moveTime * 1000) + 1000; //1 sec buffer
-                api.waitForMotion(timeoutMs);
-
-            } catch (Exception e) {
-                retryCount++;
-                if (retryCount >= maxRetries) {
-                    throw e;
-                }
-                //wait before retry
-                try {
-                    Thread.sleep(1000);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                }
-            }
-        }
-    }
-
     @Override
     protected void runPlan2() {
         // Not used in preliminary round
@@ -597,5 +574,117 @@ public class YourService extends KiboRpcService {
     @Override
     protected void runPlan3() {
         // Not used in preliminary round
+    }
+
+    private Point findNearestSafePoint(Point currentPos) {
+        Point nearest = safeWaypoints[0];
+        double minDist = Double.MAX_VALUE;
+        
+        for (Point waypoint : safeWaypoints) {
+            double dist = distance(waypoint, currentPos);
+            if (dist < minDist && isPointSafe(waypoint)) {
+                minDist = dist;
+                nearest = waypoint;
+            }
+        }
+        return nearest;
+    }
+
+    private boolean isValidMovement(Point point, Quaternion quat) {
+        return isPointSafe(point) && 
+               isValidRotation(api.getRobotKinematics().getOrientation(), quat);
+    }
+
+    private String identifyItem(List<Integer> markers) {
+        if (markers == null || markers.isEmpty()) {
+            return "unknown";
+        }
+        
+        for (Integer markerId : markers) {
+            String item = markerToItem.get(markerId);
+            if (item != null) {
+                return item;
+            }
+        }
+        return "unknown";
+    }
+
+    private Point getCorrectedPointForNavCam(Point original) {
+        return new Point(
+            original.getX() + NAV_CAM_OFFSET[0],
+            original.getY() + NAV_CAM_OFFSET[1],
+            original.getZ() + NAV_CAM_OFFSET[2]
+        );
+    }
+
+    private List<Integer> detectArUcoMarkers(Mat image, String debugTag) {
+        List<Integer> detectedMarkers = new ArrayList<>();
+        Mat gray = new Mat();
+        Imgproc.cvtColor(image, gray, Imgproc.COLOR_BGR2GRAY);
+        
+        List<Mat> corners = new ArrayList<>();
+        Mat ids = new Mat();
+        Dictionary dictionary = Aruco.getPredefinedDictionary(Aruco.DICT_5X5_250);
+        
+        try {
+            // Menggunakan versi yang benar dari detectMarkers
+            Aruco.detectMarkers(
+                gray,           // input image
+                dictionary,     // dictionary
+                corners,        // output corners
+                ids            // output ids
+            );
+            
+            if (!ids.empty()) {
+                for (int i = 0; i < ids.rows(); i++) {
+                    detectedMarkers.add((int) ids.get(i, 0)[0]);
+                }
+            }
+        } finally {
+            gray.release();
+            ids.release();
+            corners.forEach(Mat::release);
+        }
+        
+        return detectedMarkers;
+    }
+
+    private void saveDebugImage(Mat image, String tag, int attempt) {
+        // Use saveMatImage API instead
+        api.saveMatImage(image, tag + "_" + attempt);
+    }
+
+    private void completeTargetOperationOptimized() {
+        String targetItem = "unknown";
+        Point correctedAstronautPoint = getCorrectedPointForNavCam(astronautPoint);
+        
+        moveToWithRetry(correctedAstronautPoint, astronautQuaternion);
+        
+        for (int attempt = 0; attempt < 5 && "unknown".equals(targetItem); attempt++) {
+            Mat astronautImage = api.getMatNavCam();
+            List<Integer> targetMarkers = detectArUcoMarkers(astronautImage, 
+                String.format("astronaut_target_attempt_%d", attempt));
+            targetItem = identifyItem(targetMarkers);
+            
+            if (!"unknown".equals(targetItem)) {
+                api.saveMatImage(astronautImage, "target_item_detected_" + attempt);
+                break;
+            }
+        }
+        
+        api.notifyRecognitionItem();
+        
+        if (targetAreaId != -1) {
+            Point targetPoint = areaPoints[targetAreaId - 1];
+            Point correctedTargetPoint = getCorrectedPointForNavCam(targetPoint);
+            
+            if (isPointSafe(targetPoint)) {
+                moveToWithRetry(correctedTargetPoint, 
+                    createScanningQuaternion(targetPoint));
+                Mat finalImage = api.getMatNavCam();
+                api.saveMatImage(finalImage, "final_target");
+                api.takeTargetItemSnapshot();
+            }
+        }
     }
 }

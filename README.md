@@ -1,4 +1,4 @@
-# 🚀 JAXA Kibo-RPC Space Robot Programming Challenge Code By Fly Over Space Indonesia 🛸
+# 🚀 JAXA Kibo-RPC Space Robot Programming Challenge 🛸
 
 ## 🌟 Project Overview
 This repository contains code for the JAXA Kibo-RPC competition, where participants program Astrobee robots to perform autonomous missions on the International Space Station. 🌎

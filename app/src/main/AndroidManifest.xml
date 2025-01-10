@@ -26,6 +26,8 @@
             <meta-data android:name="Start Service" android:value="true" />
         </service>
 
+        <uses-library android:name="org.opencv.engine" android:required="false" />
+
     </application>
 
 </manifest>
