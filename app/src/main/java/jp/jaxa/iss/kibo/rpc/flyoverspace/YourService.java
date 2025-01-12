@@ -94,6 +94,45 @@ public class YourService extends KiboRpcService {
     private final ExecutorService executor = Executors.newFixedThreadPool(2);
     private final CompletableFuture<Void> imageProcessingFuture = new CompletableFuture<>();
 
+    private static class Node implements Comparable<Node> {
+        Point point;
+        Node parent;
+        double gCost; // Cost from start to current node
+        double hCost; // Estimated cost from current node to goal
+        
+        public Node(Point point, Node parent, double gCost, double hCost) {
+            this.point = point;
+            this.parent = parent;
+            this.gCost = gCost;
+            this.hCost = hCost;
+        }
+        
+        public double getFCost() {
+            return gCost + hCost;
+        }
+        
+        @Override
+        public int compareTo(Node other) {
+            return Double.compare(this.getFCost(), other.getFCost());
+        }
+        
+        @Override
+        public boolean equals(Object obj) {
+            if (obj instanceof Node) {
+                Node other = (Node) obj;
+                return point.getX() == other.point.getX() &&
+                       point.getY() == other.point.getY() &&
+                       point.getZ() == other.point.getZ();
+            }
+            return false;
+        }
+        
+        @Override
+        public int hashCode() {
+            return Objects.hash(point.getX(), point.getY(), point.getZ());
+        }
+    }
+
     @Override
     protected void runPlan1() {
         try {
@@ -402,7 +441,7 @@ public class YourService extends KiboRpcService {
         return isPointSafe(approach) ? approach : findNearestSafeWaypoint(target);
     }
 
-    //enhanced scanning with relative movement
+    //area
     private void scanArea(int areaIndex, Point targetPoint, Quaternion baseQuaternion) {
         boolean itemFound = false;
         float[] angles = {0f, -15f, 15f, -30f, 30f};
@@ -415,10 +454,9 @@ public class YourService extends KiboRpcService {
             
             if (isPointSafe(targetPoint) && 
                 isValidRotation(api.getRobotKinematics().getOrientation(), rotatedQuat)) {
-                
-                //try relative movement first
-                Point relativePoint = new Point(0.1, 0, 0); //small forward movement
-                api.relativeMoveTo(relativePoint, rotatedQuat, true);
+
+                Point relativeMove = new Point(0.1, 0, 0);
+                api.relativeMoveTo(relativeMove, rotatedQuat, true);
                 
                 //wait for stabilization
                 try {
@@ -507,7 +545,7 @@ public class YourService extends KiboRpcService {
         );
     }
 
-    //helper mtto handle movement with retry logic
+    //helper mt to handle movement with retry logic
     private void moveToWithRetry(Point targetPoint, Quaternion targetQuaternion) {
         int maxRetries = 3;
         int retryCount = 0;
@@ -515,32 +553,60 @@ public class YourService extends KiboRpcService {
         
         Point currentPosition = api.getRobotKinematics().getPosition();
         Quaternion currentQuaternion = api.getRobotKinematics().getOrientation();
-
-        if (!isValidDistance(currentPosition, targetPoint) && 
+        
+        if (!isValidDistance(currentPosition, targetPoint) || 
             !isValidRotation(currentQuaternion, targetQuaternion)) {
             return;
         }
-
+        
         while (!success && retryCount < maxRetries) {
             try {
-                double distance = distance(currentPosition, targetPoint);
-                double moveTime = distance / MAX_VELOCITY;
-
-                // Use moveTo with position printing
-                api.moveTo(targetPoint, targetQuaternion, true);
-                success = true;
-
-                // Use simple delay instead of waitForMotion
-                try {
-                    Thread.sleep((long)(moveTime * 1000) + 1000);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
+                List<Point> path = findPathAStar(currentPosition, targetPoint);
+                
+                if (path == null || path.isEmpty()) {
+                    throw new RuntimeException("No valid path found");
                 }
+                
+                for (Point waypoint : path) {
+                    if (!isValidDistance(currentPosition, waypoint)) {
+                        throw new RuntimeException("Invalid distance to waypoint");
+                    }
+                    
+                    //calculate intermediate quaternion for smooth rotation
+                    Quaternion intermediateQuat = calculateIntermediateQuaternion(
+                        currentQuaternion, 
+                        targetQuaternion, 
+                        currentPosition, 
+                        waypoint
+                    );
 
+                    if (!isValidRotation(currentQuaternion, intermediateQuat)) {
+                        throw new RuntimeException("Invalid rotation to waypoint");
+                    }
+                    
+                    //execute movement with all safety checks
+                    api.moveTo(waypoint, intermediateQuat, true);
+                    
+                    double distance = distance(currentPosition, waypoint);
+                    double moveTime = distance / MAX_VELOCITY;
+                    Thread.sleep((long)(moveTime * 1000) + 1000); 
+                    
+                    currentPosition = waypoint;
+                    currentQuaternion = intermediateQuat;
+                }
+                
+                //final movement to target with exact quaternion
+                if (!isValidRotation(currentQuaternion, targetQuaternion)) {
+                    api.moveTo(currentPosition, targetQuaternion, true);
+                    Thread.sleep(1000); //final rotation
+                }
+                
+                success = true;
+                
             } catch (Exception e) {
                 retryCount++;
                 if (retryCount >= maxRetries) {
-                    throw e;
+                    throw new RuntimeException("Failed to move after " + maxRetries + " attempts", e);
                 }
                 try {
                     Thread.sleep(1000);
@@ -549,6 +615,26 @@ public class YourService extends KiboRpcService {
                 }
             }
         }
+    }
+
+    // helper mt to calculate quaternion interpolation
+    private Quaternion calculateIntermediateQuaternion(
+            Quaternion start, 
+            Quaternion end, 
+            Point currentPos, 
+            Point targetPos) {
+        
+        //calculate progress along path
+        double totalDistance = distance(currentPos, targetPos);
+        double progress = Math.min(1.0, distance(currentPos, targetPos) / totalDistance);
+        
+        //interpolate quaternion
+        return new Quaternion(
+            (float)(start.getX() + (end.getX() - start.getX()) * progress),
+            (float)(start.getY() + (end.getY() - start.getY()) * progress),
+            (float)(start.getZ() + (end.getZ() - start.getZ()) * progress),
+            (float)(start.getW() + (end.getW() - start.getW()) * progress)
+        );
     }
 
     //helper mt to check if movement distance is valid
@@ -627,12 +713,11 @@ public class YourService extends KiboRpcService {
         Dictionary dictionary = Aruco.getPredefinedDictionary(Aruco.DICT_5X5_250);
         
         try {
-            // Menggunakan versi yang benar dari detectMarkers
             Aruco.detectMarkers(
-                gray,           // input image
-                dictionary,     // dictionary
-                corners,        // output corners
-                ids            // output ids
+                gray,           //input image
+                dictionary,     //dictionary
+                corners,        //output corners
+                ids            //output ids
             );
             
             if (!ids.empty()) {
@@ -650,7 +735,6 @@ public class YourService extends KiboRpcService {
     }
 
     private void saveDebugImage(Mat image, String tag, int attempt) {
-        // Use saveMatImage API instead
         api.saveMatImage(image, tag + "_" + attempt);
     }
 
@@ -679,12 +763,133 @@ public class YourService extends KiboRpcService {
             Point correctedTargetPoint = getCorrectedPointForNavCam(targetPoint);
             
             if (isPointSafe(targetPoint)) {
-                moveToWithRetry(correctedTargetPoint, 
-                    createScanningQuaternion(targetPoint));
+                moveToWithRetry(correctedTargetPoint, createScanningQuaternion(targetPoint));
                 Mat finalImage = api.getMatNavCam();
                 api.saveMatImage(finalImage, "final_target");
                 api.takeTargetItemSnapshot();
+                api.reportRoundingCompletion();
             }
         }
+    }
+
+    private void reportFoundItems() {
+        for (Map.Entry<Integer, String> entry : foundItemsMap.entrySet()) {
+            api.setAreaInfo(entry.getKey(), entry.getValue());
+        }
+    }
+
+    private List<Point> findPathAStar(Point start, Point goal) {
+        PriorityQueue<Node> openSet = new PriorityQueue<>();
+        Set<Node> closedSet = new HashSet<>();
+        
+        Node startNode = new Node(start, null, 0, heuristic(start, goal));
+        openSet.add(startNode);
+        
+        while (!openSet.isEmpty()) {
+            Node current = openSet.poll();
+            
+            if (isCloseEnough(current.point, goal)) {
+                return reconstructPath(current);
+            }
+            
+            closedSet.add(current);
+            
+            for (Point neighbor : getNeighbors(current.point)) {
+                Node neighborNode = new Node(neighbor, current,
+                    current.gCost + distance(current.point, neighbor),
+                    heuristic(neighbor, goal));
+                    
+                if (closedSet.contains(neighborNode)) {
+                    continue;
+                }
+                
+                if (!openSet.contains(neighborNode) || 
+                    neighborNode.gCost < current.gCost + distance(current.point, neighbor)) {
+                    openSet.add(neighborNode);
+                }
+            }
+        }
+        
+        return null; //no path found
+    }
+
+    private boolean isCloseEnough(Point p1, Point p2) {
+        return distance(p1, p2) < 0.05; // 5cm threshold
+    }
+
+    private double heuristic(Point start, Point goal) {
+        return distance(start, goal);
+    }
+
+    private List<Point> getNeighbors(Point point) {
+        List<Point> neighbors = new ArrayList<>();
+        double step = 0.2; 
+        
+        //generate 26 neighbors in 3D space
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    if (dx == 0 && dy == 0 && dz == 0) continue;
+                    
+                    Point neighbor = new Point(
+                        point.getX() + dx * step,
+                        point.getY() + dy * step,
+                        point.getZ() + dz * step
+                    );
+                    
+                    //safety checks (industrial standard XIXIXI)
+                    if (isPointSafe(neighbor) && 
+                        isValidDistance(point, neighbor) && 
+                        isPathSafe(point, neighbor)) {
+                        neighbors.add(neighbor);
+                    }
+                }
+            }
+        }
+        
+        return neighbors;
+    }
+
+    private List<Point> reconstructPath(Node endNode) {
+        List<Point> path = new ArrayList<>();
+        Node current = endNode;
+        
+        while (current != null) {
+            path.add(0, current.point);
+            current = current.parent;
+        }
+        
+        return smoothPath(path);
+    }
+
+    private List<Point> smoothPath(List<Point> path) {
+        if (path.size() <= 2) return path;
+        
+        List<Point> smoothed = new ArrayList<>();
+        smoothed.add(path.get(0));
+        
+        int i = 0;
+        while (i < path.size() - 1) {
+            int j = path.size() - 1;
+            while (j > i) {
+                //safety checks (industrial standard XIXIXI)
+                if (isPathSafe(path.get(i), path.get(j)) && 
+                    isValidDistance(path.get(i), path.get(j)) &&
+                    isPointSafe(path.get(j))) {
+                    smoothed.add(path.get(j));
+                    i = j;
+                    break;
+                }
+                j--;
+            }
+            if (j == i) {
+                i++;
+                if (i < path.size()) {
+                    smoothed.add(path.get(i));
+                }
+            }
+        }
+        
+        return smoothed;
     }
 }
