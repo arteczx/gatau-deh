@@ -15,7 +15,7 @@ This repository contains code for the JAXA Kibo-RPC competition, where participa
 ### 🧭 Navigation & Safety
 - 🚧 Implements boundary checking for KIZ/KOZ zones
 - ⚖️ Path safety validation with acceleration and thrust limits
-- 🎯 Safe waypoint system for obstacle avoidance
+- 🎯 Safe waypoint system & A* (A-Star) Pathfinding for obstacle avoidance
 - 🔄 Quaternion-based orientation control
 
 ### 📸 Computer Vision
