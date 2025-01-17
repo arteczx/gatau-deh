@@ -96,6 +96,12 @@ public class YourService extends KiboRpcService {
     private final ExecutorService executor = Executors.newFixedThreadPool(2);
     private final CompletableFuture<Void> imageProcessingFuture = new CompletableFuture<>();
 
+    // Tambahkan reusable Mat objects sebagai class fields
+    private Mat grayMat;
+    private Mat tempMat;
+    private Dictionary dictionary;
+    private final List<Mat> corners = new ArrayList<>();
+
     private static class Node implements Comparable<Node> {
         Point point;
         Node parent;
@@ -144,6 +150,7 @@ public class YourService extends KiboRpcService {
             e.printStackTrace();
             handleMissionFailure();
         } finally {
+            releaseMatObjects();
             cleanup();
         }
     }
@@ -167,55 +174,54 @@ public class YourService extends KiboRpcService {
         try {
             api.startMission();
 
-            //1 thread: mov & nav
             CompletableFuture<Void> navigationFuture = CompletableFuture.runAsync(() -> {
                 try {
-                    moveToWithRetry(startPoint, startQuaternion);
+                    Kinematics currentKinematics = api.getRobotKinematics();
+                    Point currentPos = currentKinematics.getPosition();
+                    if (distance(currentPos, startPoint) > 0.3) { 
+                        moveToWithRetry(startPoint, startQuaternion);
+                    }
                 } catch (Exception e) {
                     handleEmergencyStop();
                     throw e;
                 }
             }, executor);
 
-            //2 thread: img proc prep
             CompletableFuture<Void> detectionFuture = CompletableFuture.runAsync(() -> {
                 initializeCameraParameters();
+                Mat warmupImage = api.getMatNavCam();
+                detectArUcoMarkers(warmupImage, "warmup");
+                warmupImage.release();
             }, executor);
 
             try {
-                navigationFuture.get(30, TimeUnit.SECONDS);
-                detectionFuture.get(10, TimeUnit.SECONDS);
+                navigationFuture.get(20, TimeUnit.SECONDS);
+                detectionFuture.get(5, TimeUnit.SECONDS);
             } catch (TimeoutException e) {
                 handleEmergencyStop();
                 throw new RuntimeException("Mission initialization timeout", e);
             }
 
-            // Scan setiap area menggunakan scanAreaOptimized
             for (int i = 0; i < areaPoints.length; i++) {
                 final int areaIndex = i;
                 
                 try {
-                    //thread 1: mov & pos
                     CompletableFuture<Void> movementFuture = CompletableFuture.runAsync(() -> {
                         try {
-                            Point targetPoint = areaPoints[areaIndex];
-                            if (!isPointSafe(targetPoint)) {
-                                targetPoint = findNearestSafePoint(targetPoint);
-                            }
-                            moveToWithRetry(targetPoint, createScanningQuaternion(targetPoint));
+                            Point targetPoint = optimizeTargetPoint(areaPoints[areaIndex]);
+                            moveToWithRetry(targetPoint, createOptimizedScanningQuaternion(targetPoint));
                         } catch (Exception e) {
                             handleEmergencyStop();
                             throw e;
                         }
                     }, executor);
 
-                    //thread 2: img proc menggunakan scanAreaOptimized
                     CompletableFuture<Boolean> processingFuture = CompletableFuture.supplyAsync(() -> {
                         return scanAreaOptimized(areaIndex, null);
                     }, executor);
 
-                    movementFuture.get(45, TimeUnit.SECONDS);
-                    if (processingFuture.get(15, TimeUnit.SECONDS)) {
+                    movementFuture.get(30, TimeUnit.SECONDS);
+                    if (processingFuture.get(10, TimeUnit.SECONDS)) {
                         continue;
                     }
                 } catch (Exception e) {
@@ -224,12 +230,7 @@ public class YourService extends KiboRpcService {
                 }
             }
 
-            try {
-                completeTargetOperationOptimized();
-            } catch (Exception e) {
-                handleEmergencyStop();
-                throw new RuntimeException("Target operation failed", e);
-            }
+            completeTargetOperationOptimized();
             
             api.reportRoundingCompletion();
 
@@ -241,16 +242,67 @@ public class YourService extends KiboRpcService {
         }
     }
 
+    private Point optimizeTargetPoint(Point originalTarget) {
+        double optimalDistance = 0.3; //optimal distance for photo angle scoring
+        Point currentPos = api.getRobotKinematics().getPosition();
+        
+        //calc vector from current position to target
+        double dx = originalTarget.getX() - currentPos.getX();
+        double dy = originalTarget.getY() - currentPos.getY();
+        double dz = originalTarget.getZ() - currentPos.getZ();
+        
+        //normalize and adjust for optimal distance
+        double length = Math.sqrt(dx*dx + dy*dy + dz*dz);
+        if (length > 0) {
+            dx = dx/length * optimalDistance;
+            dy = dy/length * optimalDistance;
+            dz = dz/length * optimalDistance;
+        }
+        
+        //create optimized point
+        Point optimizedPoint = new Point(
+            originalTarget.getX() - dx,
+            originalTarget.getY() - dy,
+            originalTarget.getZ() - dz
+        );
+        
+        return isPointSafe(optimizedPoint) ? optimizedPoint : findNearestSafePoint(optimizedPoint);
+    }
+
+    private Quaternion createOptimizedScanningQuaternion(Point target) {
+        Point currentPos = api.getRobotKinematics().getPosition();
+        
+        double dx = target.getX() - currentPos.getX();
+        double dy = target.getY() - currentPos.getY();
+        double dz = target.getZ() - currentPos.getZ();
+        
+        float yaw = (float) Math.atan2(dy, dx);
+        
+        float pitch = (float) Math.atan2(dz, Math.sqrt(dx*dx + dy*dy));
+        pitch = Math.min(pitch, (float)Math.toRadians(30));
+        
+        float cy = (float) Math.cos(yaw * 0.5);
+        float sy = (float) Math.sin(yaw * 0.5);
+        float cp = (float) Math.cos(pitch * 0.5);
+        float sp = (float) Math.sin(pitch * 0.5);
+        
+        return new Quaternion(
+            sp * cy,
+            cp * sy,
+            sp * sy,
+            cp * cy
+        );
+    }
 
     private boolean scanAreaOptimized(int areaIndex, DetectorParameters parameters) {
         try {
-            api.flashlightControlFront(0.01f);
+            api.flashlightControlFront(0.05f);
             
             float[] angles = calculateOptimalScanAngles(areaPoints[areaIndex]);
             
             for (float angle : angles) {
                 Quaternion rotatedQuat = adjustQuaternionByDegrees(
-                    createScanningQuaternion(areaPoints[areaIndex]), 
+                    createOptimizedScanningQuaternion(areaPoints[areaIndex]), 
                     angle
                 );
                 
@@ -263,10 +315,18 @@ public class YourService extends KiboRpcService {
                         return processImagesOptimized(areaIndex, parameters);
                     }, executor);
 
-                    if (detectionFuture.get(2, TimeUnit.SECONDS)) {
+                    if (detectionFuture.get(1, TimeUnit.SECONDS)) {
                         Mat image = api.getMatNavCam();
-                        api.saveMatImage(image, "found_item_area_" + (areaIndex + 1));
-                        return true;
+                        if (verifyImageQuality(image)) {
+                            api.saveMatImage(image, String.format("area_%d_item_found", areaIndex + 1));
+                            return true;
+                        } else {
+                            api.flashlightControlFront(0.07f);
+                            image = api.getMatNavCam();
+                            api.saveMatImage(image, String.format("area_%d_item_found", areaIndex + 1));
+                            api.flashlightControlFront(0.05f);
+                            return true;
+                        }
                     }
                 } catch (TimeoutException te) {
                     continue;
@@ -277,11 +337,7 @@ public class YourService extends KiboRpcService {
             return false;
             
         } finally {
-            try {
-                api.flashlightControlFront(0f);
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
+            api.flashlightControlFront(0f);
         }
     }
 
@@ -690,17 +746,29 @@ public class YourService extends KiboRpcService {
     }
 
     private List<Integer> detectArUcoMarkers(Mat image, String debugTag) {
-        List<Integer> detectedMarkers = new ArrayList<>();
-        Mat gray = new Mat();
+        // Initialize reusable objects jika belum
+        if (grayMat == null) grayMat = new Mat();
+        if (dictionary == null) {
+            dictionary = Aruco.getPredefinedDictionary(Aruco.DICT_5X5_250);
+        }
+        
         Mat ids = new Mat();
-        List<Mat> corners = new ArrayList<>();
+        corners.clear(); // Reuse list instead of creating new
         
         try {
-            Imgproc.cvtColor(image, gray, Imgproc.COLOR_BGR2GRAY);
-            Dictionary dictionary = Aruco.getPredefinedDictionary(Aruco.DICT_5X5_250);
+            // Downscale image untuk proses lebih cepat
+            if (image.width() > 640) {
+                if (tempMat == null) tempMat = new Mat();
+                Imgproc.resize(image, tempMat, new Size(640, 480));
+                image = tempMat;
+            }
             
-            Aruco.detectMarkers(gray, dictionary, corners, ids);
+            Imgproc.cvtColor(image, grayMat, Imgproc.COLOR_BGR2GRAY);
+            Imgproc.GaussianBlur(grayMat, grayMat, new Size(5, 5), 0);
             
+            Aruco.detectMarkers(grayMat, dictionary, corners, ids);
+            
+            List<Integer> detectedMarkers = new ArrayList<>(ids.rows());
             if (!ids.empty()) {
                 for (int i = 0; i < ids.rows(); i++) {
                     detectedMarkers.add((int) ids.get(i, 0)[0]);
@@ -709,9 +777,7 @@ public class YourService extends KiboRpcService {
             return detectedMarkers;
             
         } finally {
-            gray.release();
-            ids.release();
-            corners.forEach(Mat::release);
+            ids.release(); // Release temporary Mat
         }
     }
 
@@ -926,5 +992,47 @@ public class YourService extends KiboRpcService {
         } finally {
             cleanup();
         }
+    }
+
+    private void releaseMatObjects() {
+        try {
+            if (grayMat != null) {
+                grayMat.release();
+                grayMat = null;
+            }
+            if (tempMat != null) {
+                tempMat.release();
+                tempMat = null;
+            }
+            corners.forEach(Mat::release);
+            corners.clear();
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    private boolean verifyImageQuality(Mat image) {
+        //check image brightness
+        Mat gray = new Mat();
+        Imgproc.cvtColor(image, gray, Imgproc.COLOR_BGR2GRAY);
+        Scalar mean = Core.mean(gray);
+        gray.release();
+        
+        //image too dark or too bright
+        if (mean.val[0] < 50 || mean.val[0] > 200) {
+            return false;
+        }
+        
+        //check image blur
+        Mat laplacian = new Mat();
+        Imgproc.Laplacian(image, laplacian, CvType.CV_64F);
+        MatOfDouble median = new MatOfDouble();
+        MatOfDouble std = new MatOfDouble();
+        Core.meanStdDev(laplacian, median, std);
+        double variance = Math.pow(std.get(0,0)[0], 2);
+        laplacian.release();
+        
+        //image too blurry
+        return variance > 100;
     }
 }
