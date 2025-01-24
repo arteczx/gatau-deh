@@ -58,6 +58,35 @@ public class YourService extends KiboRpcService implements ApiService {
     private Dictionary dictionary;
     private final List<Mat> corners = new ArrayList<>();
 
+    private static final int MAX_CACHE_SIZE = 5;
+    private static final long MAX_CACHE_AGE = 5000; // 5 seconds
+
+    private static class MatPool {
+        private static final int POOL_SIZE = 10;
+        private static final Queue<Mat> pool = new ConcurrentLinkedQueue<>();
+        
+        public static Mat acquire() {
+            Mat mat = pool.poll();
+            return mat != null ? mat : new Mat();
+        }
+        
+        public static void release(Mat mat) {
+            if (mat != null && !mat.empty()) {
+                mat.release();
+                if (pool.size() < POOL_SIZE) {
+                    pool.offer(new Mat());
+                }
+            }
+        }
+        
+        public static void clearPool() {
+            while (!pool.isEmpty()) {
+                Mat mat = pool.poll();
+                if (mat != null) mat.release();
+            }
+        }
+    }
+
     @Override
     protected void runPlan1() {
         try {
@@ -96,13 +125,12 @@ public class YourService extends KiboRpcService implements ApiService {
     }
 
     public List<Integer> detectArUcoMarkers(Mat image, String debugTag) {
-        //initialize reusable objects if needed
         if (grayMat == null) grayMat = new Mat();
         if (dictionary == null) {
             dictionary = Aruco.getPredefinedDictionary(Aruco.DICT_5X5_250);
         }
         
-        return Helper.detectArUcoMarkers(image, dictionary, grayMat, tempMat, corners);
+        return Helper.detectArUcoMarkers(this, image, dictionary, grayMat, tempMat, corners);
     }
 
     private void handleMissionFailure() {
@@ -112,8 +140,6 @@ public class YourService extends KiboRpcService implements ApiService {
     private void cleanup() {
         Helper.cleanup(this, executor, imageCache, cameraMatrix, distCoeffs);
     }
-
-    //helper mt(KOZ & KIZ)
 
     public boolean isValidMovement(Point point, Quaternion quat) {
         return Helper.isValidMovement(point, quat, this);
@@ -276,5 +302,46 @@ public class YourService extends KiboRpcService implements ApiService {
     @Override
     public void internalCleanup() {
         cleanup();
+    }
+
+    @Override
+    public void cleanImageCache() {
+        long currentTime = System.currentTimeMillis();
+        imageCache.entrySet().removeIf(entry -> {
+            if (imageCache.size() > MAX_CACHE_SIZE || 
+                currentTime - lastDetectionTime.getOrDefault(entry.getKey().hashCode(), 0L) > MAX_CACHE_AGE) {
+                Mat mat = entry.getValue();
+                if (mat != null && !mat.empty()) {
+                    mat.release();
+                }
+                return true;
+            }
+            return false;
+        });
+    }
+
+    @Override
+    public Mat acquireMatFromPool() {
+        return MatPool.acquire();
+    }
+
+    @Override
+    public void releaseMatToPool(Mat mat) {
+        MatPool.release(mat);
+    }
+
+    @Override
+    public void clearMatPool() {
+        MatPool.clearPool();
+    }
+
+    @Override
+    public int getMaxCacheSize() {
+        return MAX_CACHE_SIZE;
+    }
+
+    @Override
+    public long getMaxCacheAge() {
+        return MAX_CACHE_AGE;
     }
 }

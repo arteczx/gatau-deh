@@ -26,6 +26,8 @@ import java.util.Objects;
 import java.util.HashMap;
 import java.util.Collections;
 import gov.nasa.arc.astrobee.Kinematics;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 public class Helper {
     public static final double MAX_VELOCITY = 0.5;  // m/s
@@ -367,10 +369,13 @@ public class Helper {
         List<Point> smoothed = new ArrayList<>();
         smoothed.add(path.get(0));
         
+        int maxIterations = path.size() * path.size();
+        int iterations = 0;
+        
         int i = 0;
-        while (i < path.size() - 1) {
+        while (i < path.size() - 1 && iterations++ < maxIterations) {
             int j = path.size() - 1;
-            while (j > i) {
+            while (j > i && iterations++ < maxIterations) {
                 if (isPathSafe(path.get(i), path.get(j)) && 
                     isValidDistance(path.get(i), path.get(j)) &&
                     isPointSafe(path.get(j))) {
@@ -387,24 +392,28 @@ public class Helper {
                 }
             }
         }
+
+        if (iterations >= maxIterations) {
+            return path;
+        }
         
         return smoothed;
     }
 
-    public static List<Integer> detectArUcoMarkers(Mat image, Dictionary dictionary, Mat grayMat, Mat tempMat, List<Mat> corners) {
-        Mat ids = new Mat();
-        corners.clear(); //reuse list instead of creating new
+    public static List<Integer> detectArUcoMarkers(ApiService service, Mat image, Dictionary dictionary, Mat grayMat, Mat tempMat, List<Mat> corners) {
+        Mat ids = service.acquireMatFromPool();
+        Mat resized = null;
         
         try {
             if (image.width() > 640) {
-                if (tempMat == null) tempMat = new Mat();
-                Imgproc.resize(image, tempMat, new Size(640, 480));
-                image = tempMat;
+                resized = service.acquireMatFromPool();
+                Imgproc.resize(image, resized, new Size(640, 480));
+                image = resized;
             }
             
             Imgproc.cvtColor(image, grayMat, Imgproc.COLOR_BGR2GRAY);
-            Imgproc.GaussianBlur(grayMat, grayMat, new Size(5, 5), 0);
             
+            corners.clear();
             Aruco.detectMarkers(grayMat, dictionary, corners, ids);
             
             List<Integer> detectedMarkers = new ArrayList<>(ids.rows());
@@ -416,7 +425,10 @@ public class Helper {
             return detectedMarkers;
             
         } finally {
-            ids.release(); //release temporary Mat
+            service.releaseMatToPool(ids);
+            if (resized != null) {
+                service.releaseMatToPool(resized);
+            }
         }
     }
 
@@ -465,6 +477,7 @@ public class Helper {
             shutdownLights(service);
             releaseImageResources(imageCache, cameraMatrix, distCoeffs);
             shutdownExecutor(executor);
+            MatPool.clearPool();
         } catch (Exception e) {
             e.printStackTrace();
         } finally {
@@ -489,16 +502,16 @@ public class Helper {
                                             Mat cameraMatrix, Mat distCoeffs) {
         try {
             if (cameraMatrix != null) {
-                cameraMatrix.release();
+                MatPool.release(cameraMatrix);
             }
             if (distCoeffs != null) {
-                distCoeffs.release();
+                MatPool.release(distCoeffs);
             }
             
             if (imageCache != null) {
                 imageCache.values().forEach(mat -> {
                     if (mat != null && !mat.empty()) {
-                        mat.release();
+                        MatPool.release(mat);
                     }
                 });
                 imageCache.clear();
@@ -776,24 +789,33 @@ public class Helper {
     private static boolean processImagesOptimized(ApiService service, int areaIndex, 
                                                 ApiService service2) {
         Mat image = service.getMatNavCam();
-        String cacheKey = "area_" + areaIndex;
+        Mat gray = null;
         
-        Mat gray = service.getImageCache().computeIfAbsent(cacheKey, k -> new Mat());
-        Imgproc.cvtColor(image, gray, Imgproc.COLOR_BGR2GRAY);
-        Imgproc.GaussianBlur(gray, gray, new Size(5, 5), 0);
-        Imgproc.threshold(gray, gray, 127, 255, Imgproc.THRESH_BINARY);
+        try {
+            String cacheKey = "area_" + areaIndex;
+            gray = MatPool.acquire();
+            
+            Imgproc.cvtColor(image, gray, Imgproc.COLOR_BGR2GRAY);
+            Imgproc.GaussianBlur(gray, gray, new Size(5, 5), 0);
+            Imgproc.threshold(gray, gray, 127, 255, Imgproc.THRESH_BINARY);
 
-        List<Integer> markers = service.detectArUcoMarkers(gray, "area_" + areaIndex);
-        
-        if (!markers.isEmpty()) {
-            String detectedItem = identifyItem(markers);
-            if (!"unknown".equals(detectedItem)) {
-                service.setAreaInfo(areaIndex + 1, detectedItem, 1);
-                service.getFoundItemsMap().put(areaIndex + 1, detectedItem);
-                return true;
+            List<Integer> markers = service.detectArUcoMarkers(gray, "area_" + areaIndex);
+            
+            if (!markers.isEmpty()) {
+                String detectedItem = identifyItem(markers);
+                if (!"unknown".equals(detectedItem)) {
+                    service.setAreaInfo(areaIndex + 1, detectedItem, 1);
+                    service.getFoundItemsMap().put(areaIndex + 1, detectedItem);
+                    return true;
+                }
             }
+            return false;
+        } finally {
+            if (gray != null) {
+                MatPool.release(gray);
+            }
+            service.cleanImageCache(); // Call the new cache cleaning method
         }
-        return false;
     }
 
     public static void saveDebugImage(ApiService service, Mat image, String tag, int attempt) {
@@ -930,6 +952,32 @@ public class Helper {
             service.internalHandleFailure();
         } finally {
             service.internalCleanup();
+        }
+    }
+
+    private static class MatPool {
+        private static final int POOL_SIZE = 10;
+        private static final Queue<Mat> pool = new ConcurrentLinkedQueue<>();
+        
+        public static Mat acquire() {
+            Mat mat = pool.poll();
+            return mat != null ? mat : new Mat();
+        }
+        
+        public static void release(Mat mat) {
+            if (mat != null && !mat.empty()) {
+                mat.release();
+                if (pool.size() < POOL_SIZE) {
+                    pool.offer(new Mat());
+                }
+            }
+        }
+        
+        public static void clearPool() {
+            while (!pool.isEmpty()) {
+                Mat mat = pool.poll();
+                if (mat != null) mat.release();
+            }
         }
     }
 }

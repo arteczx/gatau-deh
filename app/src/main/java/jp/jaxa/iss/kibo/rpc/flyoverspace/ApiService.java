@@ -33,4 +33,10 @@ public interface ApiService {
     void internalInitCamera();
     void internalHandleFailure();
     void internalCleanup();
+    void cleanImageCache();
+    Mat acquireMatFromPool();
+    void releaseMatToPool(Mat mat);
+    void clearMatPool();
+    int getMaxCacheSize();
+    long getMaxCacheAge();
 } 
