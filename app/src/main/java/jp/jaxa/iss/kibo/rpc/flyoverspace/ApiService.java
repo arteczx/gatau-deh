@@ -28,4 +28,9 @@ public interface ApiService {
     boolean isValidMovement(Point point, Quaternion quat);
     Map<String, Mat> getImageCache();
     Map<Integer, String> getFoundItemsMap();
+    void internalStartMission();
+    void internalHandleEmergency(); 
+    void internalInitCamera();
+    void internalHandleFailure();
+    void internalCleanup();
 } 

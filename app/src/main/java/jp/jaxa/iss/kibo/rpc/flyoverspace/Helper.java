@@ -25,6 +25,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.Objects;
 import java.util.HashMap;
 import java.util.Collections;
+import gov.nasa.arc.astrobee.Kinematics;
 
 public class Helper {
     public static final double MAX_VELOCITY = 0.5;  // m/s
@@ -854,5 +855,81 @@ public class Helper {
     public static boolean isValidMovement(Point point, Quaternion quat, ApiService service) {
         return isPointSafe(point) && 
                isValidRotation(service.getRobotKinematics().getOrientation(), quat);
+    }
+
+    public static void executeMainMission(ApiService service, Point startPoint, 
+                                        Quaternion startQuaternion, Point[] areaPoints,
+                                        ExecutorService executor) {
+        try {
+            service.internalStartMission();
+
+            CompletableFuture<Void> navigationFuture = CompletableFuture.runAsync(() -> {
+                try {
+                    Kinematics currentKinematics = service.getRobotKinematics();
+                    Point currentPos = currentKinematics.getPosition();
+                    if (distance(currentPos, startPoint) > 0.3) { 
+                        moveToWithRetry(service, startPoint, startQuaternion);
+                    }
+                } catch (Exception e) {
+                    service.internalHandleEmergency();
+                    throw e;
+                }
+            }, executor);
+
+            CompletableFuture<Void> detectionFuture = CompletableFuture.runAsync(() -> {
+                service.internalInitCamera();
+                Mat warmupImage = service.getMatNavCam();
+                service.detectArUcoMarkers(warmupImage, "warmup");
+                warmupImage.release();
+            }, executor);
+
+            try {
+                navigationFuture.get(20, TimeUnit.SECONDS);
+                detectionFuture.get(5, TimeUnit.SECONDS);
+            } catch (TimeoutException e) {
+                service.internalHandleEmergency();
+                throw new RuntimeException("Mission initialization timeout", e);
+            }
+
+            for (int i = 0; i < areaPoints.length; i++) {
+                final int areaIndex = i;
+                
+                try {
+                    CompletableFuture<Void> movementFuture = CompletableFuture.runAsync(() -> {
+                        try {
+                            Point targetPoint = optimizeTargetPoint(areaPoints[areaIndex], service);
+                            moveToWithRetry(service, targetPoint, 
+                                service.createOptimizedScanningQuaternion(targetPoint));
+                        } catch (Exception e) {
+                            service.internalHandleEmergency();
+                            throw e;
+                        }
+                    }, executor);
+
+                    CompletableFuture<Boolean> processingFuture = CompletableFuture.supplyAsync(() -> {
+                        return scanAreaOptimized(service, areaIndex, areaPoints, executor, service);
+                    }, executor);
+
+                    movementFuture.get(30, TimeUnit.SECONDS);
+                    if (processingFuture.get(10, TimeUnit.SECONDS)) {
+                        continue;
+                    }
+                } catch (Exception e) {
+                    service.internalHandleEmergency();
+                    throw new RuntimeException("Area scanning failed: " + areaIndex, e);
+                }
+            }
+
+            completeTargetOperationOptimized(service, ASTRONAUT_POINT, ASTRONAUT_QUATERNION, 
+                                           -1, areaPoints, service);
+            
+            service.reportRoundingCompletion();
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            service.internalHandleFailure();
+        } finally {
+            service.internalCleanup();
+        }
     }
 }

@@ -80,75 +80,7 @@ public class YourService extends KiboRpcService implements ApiService {
     }
 
     private void executeMainMission() {
-        try {
-            api.startMission();
-
-            CompletableFuture<Void> navigationFuture = CompletableFuture.runAsync(() -> {
-                try {
-                    Kinematics currentKinematics = api.getRobotKinematics();
-                    Point currentPos = currentKinematics.getPosition();
-                    if (Helper.distance(currentPos, startPoint) > 0.3) { 
-                        moveToWithRetry(startPoint, startQuaternion);
-                    }
-                } catch (Exception e) {
-                    handleEmergencyStop();
-                    throw e;
-                }
-            }, executor);
-
-            CompletableFuture<Void> detectionFuture = CompletableFuture.runAsync(() -> {
-                initializeCameraParameters();
-                Mat warmupImage = api.getMatNavCam();
-                detectArUcoMarkers(warmupImage, "warmup");
-                warmupImage.release();
-            }, executor);
-
-            try {
-                navigationFuture.get(20, TimeUnit.SECONDS);
-                detectionFuture.get(5, TimeUnit.SECONDS);
-            } catch (TimeoutException e) {
-                handleEmergencyStop();
-                throw new RuntimeException("Mission initialization timeout", e);
-            }
-
-            for (int i = 0; i < areaPoints.length; i++) {
-                final int areaIndex = i;
-                
-                try {
-                    CompletableFuture<Void> movementFuture = CompletableFuture.runAsync(() -> {
-                        try {
-                            Point targetPoint = optimizeTargetPoint(areaPoints[areaIndex]);
-                            moveToWithRetry(targetPoint, createOptimizedScanningQuaternion(targetPoint));
-                        } catch (Exception e) {
-                            handleEmergencyStop();
-                            throw e;
-                        }
-                    }, executor);
-
-                    CompletableFuture<Boolean> processingFuture = CompletableFuture.supplyAsync(() -> {
-                        return scanAreaOptimized(areaIndex, null);
-                    }, executor);
-
-                    movementFuture.get(30, TimeUnit.SECONDS);
-                    if (processingFuture.get(10, TimeUnit.SECONDS)) {
-                        continue;
-                    }
-                } catch (Exception e) {
-                    handleEmergencyStop();
-                    throw new RuntimeException("Area scanning failed: " + areaIndex, e);
-                }
-            }
-
-            completeTargetOperationOptimized();
-            
-            api.reportRoundingCompletion();
-
-        } catch (Exception e) {
-            e.printStackTrace();
-            handleMissionFailure();
-        } finally {
-            cleanup();
-        }
+        Helper.executeMainMission(this, startPoint, startQuaternion, areaPoints, executor);
     }
 
     private Point optimizeTargetPoint(Point originalTarget) {
@@ -319,5 +251,30 @@ public class YourService extends KiboRpcService implements ApiService {
     @Override
     public void notifyRecognitionItem() {
         api.notifyRecognitionItem();
+    }
+
+    @Override
+    public void internalStartMission() {
+        api.startMission();
+    }
+
+    @Override
+    public void internalHandleEmergency() {
+        handleEmergencyStop();
+    }
+
+    @Override
+    public void internalInitCamera() {
+        initializeCameraParameters();
+    }
+
+    @Override
+    public void internalHandleFailure() {
+        handleMissionFailure();
+    }
+
+    @Override
+    public void internalCleanup() {
+        cleanup();
     }
 }
