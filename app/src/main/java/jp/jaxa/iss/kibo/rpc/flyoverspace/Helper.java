@@ -73,7 +73,6 @@ public class Helper {
     public static final Quaternion ASTRONAUT_QUATERNION = new Quaternion(0f, 0f, 0.707f, 0.707f);
 
     public static final double[] NAV_CAM_OFFSET = {0.1177, -0.0422, -0.0826};
-    public static final double[] HAZ_CAM_OFFSET = {0.1328, 0.0362, -0.0826};
 
     public static final long DETECTION_COOLDOWN = 500; //ms
 
@@ -818,9 +817,6 @@ public class Helper {
         }
     }
 
-    public static void saveDebugImage(ApiService service, Mat image, String tag, int attempt) {
-        service.saveMatImage(image, tag + "_" + attempt);
-    }
 
     public static Point optimizeTargetPoint(Point originalTarget, ApiService service) {
         double optimalDistance = 0.3; //optimal distance for photo angle scoring

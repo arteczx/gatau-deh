@@ -42,7 +42,6 @@ public class YourService extends KiboRpcService implements ApiService {
     private final Map<Integer, String> markerToItem = Helper.MARKER_TO_ITEM;
 
     private static final double[] NAV_CAM_OFFSET = Helper.NAV_CAM_OFFSET;
-    private static final double[] HAZ_CAM_OFFSET = Helper.HAZ_CAM_OFFSET;
     private Mat cameraMatrix;
     private Mat distCoeffs;
 
@@ -177,10 +176,6 @@ public class YourService extends KiboRpcService implements ApiService {
     @Override
     protected void runPlan3() {
         // Not used in preliminary round
-    }
-
-    private void saveDebugImage(Mat image, String tag, int attempt) {
-        Helper.saveDebugImage(this, image, tag, attempt);
     }
 
     private void completeTargetOperationOptimized() {
@@ -333,15 +328,5 @@ public class YourService extends KiboRpcService implements ApiService {
     @Override
     public void clearMatPool() {
         MatPool.clearPool();
-    }
-
-    @Override
-    public int getMaxCacheSize() {
-        return MAX_CACHE_SIZE;
-    }
-
-    @Override
-    public long getMaxCacheAge() {
-        return MAX_CACHE_AGE;
     }
 }

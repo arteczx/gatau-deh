@@ -37,6 +37,4 @@ public interface ApiService {
     Mat acquireMatFromPool();
     void releaseMatToPool(Mat mat);
     void clearMatPool();
-    int getMaxCacheSize();
-    long getMaxCacheAge();
 } 
