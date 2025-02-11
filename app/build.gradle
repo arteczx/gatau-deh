@@ -5,6 +5,7 @@ repositories {
     maven { url 'https://jitpack.io' }
     maven { url "https://dl.google.com/dl/android/maven2/" }
     maven { url 'https://raw.github.com/rosjava/rosjava_mvn_repo/master' }
+    maven { url 'https://maven.aliyun.com/repository/public' }
 }
 
 android {
@@ -44,42 +45,36 @@ android {
         exclude 'META-INF/dependencies.txt'
         exclude 'META-INF/LGPL2.1'
     }
-    sourceSets {
-        main {
-            jniLibs.srcDirs = ['src/main/jniLibs']
-        }
-    }
     lintOptions {
         abortOnError false
         disable 'InvalidPackage'
         ignore 'InvalidPackage'
     }
+    ndkVersion "20.0.5594570"
 }
 
 dependencies {
-    compile project(':guest_science_library')
-    compile project(':kibo_rpc_api')
-    compile fileTree(dir: 'libs', include: ['*.jar'])
-    compile 'com.android.support:appcompat-v7:26.+'
-    compile 'com.android.support.constraint:constraint-layout:1.0.2'
-    compile('org.ros.rosjava_core:rosjava:[0.2,0.3)') {
+    implementation project(':guest_science_library')
+    implementation project(':kibo_rpc_api')
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+    implementation 'com.android.support:appcompat-v7:26.+'
+    implementation 'com.android.support.constraint:constraint-layout:1.0.2'
+    implementation('org.ros.rosjava_core:rosjava:[0.2,0.3)') {
         exclude group: 'org.apache.commons'
         exclude group: 'xml-apis'
         exclude group: 'junit'
     }
-    compile('org.ros.android_core:android_10:[0.2,0.3)') {
+    implementation('org.ros.android_core:android_10:[0.2,0.3)') {
         exclude group: 'org.apache.commons'
         exclude group: 'xml-apis'
         exclude group: 'junit'
     }
-    testCompile 'junit:junit:4.12'
+    testImplementation 'junit:junit:4.12'
 
-    // OpenCV dependencies - using a simpler version
-    implementation 'org.bytedeco:javacv:1.4.4'
-    implementation 'org.bytedeco:javacpp:1.4.4'
-    implementation 'org.bytedeco.javacpp-presets:opencv:3.4.3-1.4.4'
-    implementation 'org.bytedeco.javacpp-presets:opencv:3.4.3-1.4.4:android-arm'
-    implementation 'org.bytedeco.javacpp-presets:opencv:3.4.3-1.4.4:android-x86'
+    implementation 'org.bytedeco:javacv:1.5.7'
+    implementation 'org.bytedeco:opencv:4.5.5-1.5.7'
+    implementation 'org.bytedeco:opencv:4.5.5-1.5.7:android-arm64'
+    implementation 'org.bytedeco:opencv:4.5.5-1.5.7:android-x86'
 
     implementation 'commons-logging:commons-logging:1.2'
     implementation 'commons-net:commons-net:3.9.0'
@@ -87,6 +82,4 @@ dependencies {
     implementation 'commons-codec:commons-codec:1.15'
     implementation 'commons-io:commons-io:2.11.0'
     implementation 'commons-lang:commons-lang:2.6'
-
-
 }
