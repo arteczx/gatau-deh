@@ -90,7 +90,7 @@ public class YourService extends KiboRpcService implements ApiService {
     protected void runPlan1() {
         try {
             initializeCameraParameters();
-            executeMainMission();
+            executeTreasureHuntMission();
         } catch (Exception e) {
             e.printStackTrace();
             handleMissionFailure();
@@ -107,8 +107,8 @@ public class YourService extends KiboRpcService implements ApiService {
         Helper.initializeCameraParameters(cameraMatrix, distCoeffs, camParams);
     }
 
-    private void executeMainMission() {
-        Helper.executeMainMission(this, startPoint, startQuaternion, areaPoints, executor);
+    private void executeTreasureHuntMission() {
+        Helper.executeTreasureHuntMission(this, executor);
     }
 
     private Point optimizeTargetPoint(Point originalTarget) {
@@ -123,13 +123,66 @@ public class YourService extends KiboRpcService implements ApiService {
         return Helper.scanAreaOptimized(this, areaIndex, areaPoints, executor, this);
     }
 
+    @Override
     public List<Integer> detectArUcoMarkers(Mat image, String debugTag) {
-        if (grayMat == null) grayMat = new Mat();
-        if (dictionary == null) {
-            dictionary = Aruco.getPredefinedDictionary(Aruco.DICT_5X5_250);
+        if (image == null || image.empty()) {
+            return Collections.emptyList();
+        }
+
+        List<Integer> detectedMarkers = new ArrayList<>();
+        Mat gray = new Mat();
+        
+        try {
+            // Convert to grayscale for better detection
+            Imgproc.cvtColor(image, gray, Imgproc.COLOR_BGR2GRAY);
+            
+            // Initialize ArUco detector if not already done
+            if (dictionary == null) {
+                dictionary = Aruco.getPredefinedDictionary(Aruco.DICT_5X5_250);
+            }
+            
+            // Detect markers
+            Mat markerIds = new Mat();
+            List<Mat> markerCorners = new ArrayList<>();
+            DetectorParameters parameters = DetectorParameters.create();
+            
+            Aruco.detectMarkers(gray, dictionary, markerCorners, markerIds, parameters);
+            
+            // Process detected markers
+            if (!markerIds.empty()) {
+                for (int i = 0; i < markerIds.rows(); i++) {
+                    int id = (int) markerIds.get(i, 0)[0];
+                    detectedMarkers.add(id);
+                    
+                    // Store the detected item if it's a landmark or treasure
+                    if (Helper.MARKER_TO_LANDMARK.containsKey(id)) {
+                        foundItemsMap.put(id, Helper.MARKER_TO_LANDMARK.get(id));
+                    } else if (Helper.MARKER_TO_TREASURE.containsKey(id)) {
+                        foundItemsMap.put(id, Helper.MARKER_TO_TREASURE.get(id));
+                    }
+                    
+                    // Avoid detecting the same marker too frequently
+                    lastDetectionTime.put(id, System.currentTimeMillis());
+                }
+                
+                // Draw markers on debug image if requested
+                if (debugTag != null && !debugTag.isEmpty()) {
+                    Mat debugImage = image.clone();
+                    Aruco.drawDetectedMarkers(debugImage, markerCorners, markerIds);
+                    saveMatImage(debugImage, debugTag + "_markers");
+                    debugImage.release();
+                }
+            }
+            
+        } catch (Exception e) {
+            e.printStackTrace();
+        } finally {
+            if (gray != null && !gray.empty()) {
+                gray.release();
+            }
         }
         
-        return Helper.detectArUcoMarkers(this, image, dictionary, grayMat, tempMat, corners);
+        return detectedMarkers;
     }
 
     private void handleMissionFailure() {
@@ -160,7 +213,29 @@ public class YourService extends KiboRpcService implements ApiService {
 
     //helper mt to create scanning quaternion based on position
     public Quaternion createScanningQuaternion(Point target) {
-        return Helper.createScanningQuaternion(target, startPoint);
+        // Create a quaternion that looks at the target point
+        double dx = target.getX() - getRobotKinematics().getPosition().getX();
+        double dy = target.getY() - getRobotKinematics().getPosition().getY();
+        double dz = target.getZ() - getRobotKinematics().getPosition().getZ();
+        
+        // Calculate yaw (around z-axis)
+        double yaw = Math.atan2(dy, dx);
+        
+        // Calculate pitch (around y-axis)
+        double pitch = Math.atan2(dz, Math.sqrt(dx*dx + dy*dy));
+        
+        // Convert to quaternion
+        double cy = Math.cos(yaw * 0.5);
+        double sy = Math.sin(yaw * 0.5);
+        double cp = Math.cos(pitch * 0.5);
+        double sp = Math.sin(pitch * 0.5);
+        
+        return new Quaternion(
+            (float)(sp * cy),
+            (float)(cp * sy),
+            (float)(cp * cy),
+            (float)(sp * sy)
+        );
     }
 
     //helper mt to handle movement with retry logic

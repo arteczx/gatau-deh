@@ -92,6 +92,53 @@ public class Helper {
         MARKER_TO_ITEM = Collections.unmodifiableMap(map);
     }
 
+    // Treasure Hunt Game Constants
+    public static final Point DOCK_STATION = new Point(10.5, -9.0, 4.5);
+    public static final Quaternion DOCK_QUATERNION = new Quaternion(0, 0, 0, 1);
+    
+    // Candidate treasure sites
+    public static final Point[] TREASURE_SITES = {
+        new Point(10.8, -9.2, 4.6),  // Site 1
+        new Point(11.2, -8.5, 5.0),  // Site 2
+        new Point(10.6, -7.8, 4.8),  // Site 3
+        new Point(11.0, -7.2, 5.2)   // Site 4
+    };
+    
+    // Oasis zones - points that give bonus points when passed through
+    public static final Point[] OASIS_ZONES = {
+        new Point(10.7, -8.8, 4.7),
+        new Point(11.1, -8.0, 5.1),
+        new Point(10.5, -7.5, 4.9)
+    };
+    
+    // Landmark types
+    public static final String[] LANDMARK_TYPES = {"coin", "fossil", "shell"};
+    
+    // Treasure types
+    public static final String[] TREASURE_TYPES = {"crystal", "diamond", "emerald"};
+    
+    // Mapping of ArUco marker IDs to landmark and treasure types
+    public static final Map<Integer, String> MARKER_TO_LANDMARK;
+    static {
+        Map<Integer, String> map = new HashMap<>();
+        map.put(1, "coin");
+        map.put(2, "fossil");
+        map.put(3, "shell");
+        MARKER_TO_LANDMARK = Collections.unmodifiableMap(map);
+    }
+    
+    public static final Map<Integer, String> MARKER_TO_TREASURE;
+    static {
+        Map<Integer, String> map = new HashMap<>();
+        map.put(4, "crystal");
+        map.put(5, "diamond");
+        map.put(6, "emerald");
+        MARKER_TO_TREASURE = Collections.unmodifiableMap(map);
+    }
+    
+    // Signal light control
+    public static final float SIGNAL_LIGHT_POWER = 0.8f;
+
     public static class Node implements Comparable<Node> {
         Point point;
         Node parent;
@@ -974,6 +1021,208 @@ public class Helper {
                 Mat mat = pool.poll();
                 if (mat != null) mat.release();
             }
+        }
+    }
+
+    /**
+     * Execute the treasure hunt mission according to the game flow
+     */
+    public static void executeTreasureHuntMission(ApiService service, ExecutorService executor) {
+        try {
+            service.internalStartMission();
+            
+            // 1. Start from the docking station
+            moveToWithRetry(service, DOCK_STATION, DOCK_QUATERNION);
+            
+            // 2. Visit candidate treasure sites
+            Map<Integer, String> foundLandmarks = new HashMap<>();
+            for (int i = 0; i < TREASURE_SITES.length; i++) {
+                Point site = TREASURE_SITES[i];
+                
+                // Check if we can pass through an oasis zone on the way
+                Point pathPoint = findNearestOasisZone(service.getRobotKinematics().getPosition(), site);
+                if (pathPoint != null) {
+                    moveToWithRetry(service, pathPoint, createOptimalQuaternion(pathPoint, site));
+                }
+                
+                // Move to the treasure site
+                moveToWithRetry(service, site, createOptimalQuaternion(site, null));
+                
+                // Scan for landmarks at this site
+                List<Integer> detectedMarkers = scanForMarkers(service, site);
+                for (Integer markerId : detectedMarkers) {
+                    if (MARKER_TO_LANDMARK.containsKey(markerId)) {
+                        String landmark = MARKER_TO_LANDMARK.get(markerId);
+                        foundLandmarks.put(i, landmark);
+                        service.setAreaInfo(i, landmark, markerId);
+                    }
+                }
+            }
+            
+            // 3. Go to the astronaut to get clues about the real treasure
+            moveToWithRetry(service, ASTRONAUT_POINT, ASTRONAUT_QUATERNION);
+            
+            // 4. Get clues from the astronaut
+            Mat astronautImage = service.getMatNavCam();
+            List<Integer> astronautMarkers = service.detectArUcoMarkers(astronautImage, "astronaut_clue");
+            service.saveMatImage(astronautImage, "astronaut_clue_image");
+            
+            // 5. Determine the real treasure location based on clues
+            int realTreasureSiteIndex = determineRealTreasureSite(astronautMarkers, foundLandmarks);
+            
+            if (realTreasureSiteIndex >= 0 && realTreasureSiteIndex < TREASURE_SITES.length) {
+                // 6. Go to the real treasure location
+                Point realTreasureSite = TREASURE_SITES[realTreasureSiteIndex];
+                moveToWithRetry(service, realTreasureSite, createOptimalQuaternion(realTreasureSite, null));
+                
+                // 7. Take a picture of the real treasure
+                Mat treasureImage = service.getMatNavCam();
+                service.saveMatImage(treasureImage, "real_treasure");
+                service.takeTargetItemSnapshot();
+                
+                // 8. Activate signal lights to complete the mission
+                service.flashlightControlFront(SIGNAL_LIGHT_POWER);
+                service.flashlightControlBack(SIGNAL_LIGHT_POWER);
+                
+                // Wait a moment for the lights to be visible
+                try {
+                    Thread.sleep(2000);
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+                
+                // Turn off the lights
+                service.flashlightControlFront(0f);
+                service.flashlightControlBack(0f);
+            }
+            
+            // Mission complete
+            service.reportRoundingCompletion();
+            
+        } catch (Exception e) {
+            e.printStackTrace();
+            service.internalHandleFailure();
+        } finally {
+            service.internalCleanup();
+        }
+    }
+    
+    /**
+     * Find the nearest oasis zone between current position and destination
+     */
+    private static Point findNearestOasisZone(Point current, Point destination) {
+        double minDistance = Double.MAX_VALUE;
+        Point nearestOasis = null;
+        
+        for (Point oasis : OASIS_ZONES) {
+            // Check if oasis is roughly on the path between current and destination
+            double distanceToOasis = distance(current, oasis);
+            double oasisToDestination = distance(oasis, destination);
+            double directDistance = distance(current, destination);
+            
+            // If going through the oasis doesn't add too much to the path length
+            if (distanceToOasis + oasisToDestination < directDistance * 1.3) {
+                if (distanceToOasis < minDistance) {
+                    minDistance = distanceToOasis;
+                    nearestOasis = oasis;
+                }
+            }
+        }
+        
+        return nearestOasis;
+    }
+    
+    /**
+     * Scan for ArUco markers at a given site
+     */
+    private static List<Integer> scanForMarkers(ApiService service, Point site) {
+        List<Integer> detectedMarkers = new ArrayList<>();
+        
+        // Try different angles to scan for markers
+        float[] scanAngles = {0f, 30f, -30f, 60f, -60f};
+        for (float angle : scanAngles) {
+            Quaternion scanQuat = adjustQuaternionByDegrees(
+                createOptimalQuaternion(site, null), angle);
+            
+            if (service.isValidMovement(site, scanQuat)) {
+                Result result = service.moveTo(site, scanQuat, true);
+                if (result == null) {
+                    continue;
+                }
+                
+                // Take a picture and detect markers
+                Mat image = service.getMatNavCam();
+                List<Integer> markers = service.detectArUcoMarkers(image, "site_scan_" + angle);
+                
+                if (markers != null && !markers.isEmpty()) {
+                    service.saveMatImage(image, "landmark_detected");
+                    detectedMarkers.addAll(markers);
+                }
+            }
+        }
+        
+        return detectedMarkers;
+    }
+    
+    /**
+     * Determine the real treasure site based on astronaut clues and found landmarks
+     */
+    private static int determineRealTreasureSite(List<Integer> astronautMarkers, Map<Integer, String> foundLandmarks) {
+        // Simple algorithm: The astronaut will show a marker that corresponds to the landmark
+        // at the site where the real treasure is hidden
+        
+        if (astronautMarkers == null || astronautMarkers.isEmpty()) {
+            return 0;
+        }
+        
+        for (Integer markerId : astronautMarkers) {
+            if (MARKER_TO_LANDMARK.containsKey(markerId)) {
+                String targetLandmark = MARKER_TO_LANDMARK.get(markerId);
+                
+                // Find which site had this landmark
+                for (Map.Entry<Integer, String> entry : foundLandmarks.entrySet()) {
+                    if (entry.getValue().equals(targetLandmark)) {
+                        return entry.getKey();
+                    }
+                }
+            }
+        }
+        
+        // If no match found, return the first site as default
+        return 0;
+    }
+    
+    /**
+     * Create an optimal quaternion for viewing a point
+     */
+    private static Quaternion createOptimalQuaternion(Point target, Point lookAt) {
+        if (lookAt == null) {
+            // Default orientation looking slightly downward
+            return new Quaternion(0, 0.1f, 0, 0.99f);
+        } else {
+            // Orient toward the lookAt point
+            double dx = lookAt.getX() - target.getX();
+            double dy = lookAt.getY() - target.getY();
+            double dz = lookAt.getZ() - target.getZ();
+            
+            // Calculate yaw (around z-axis)
+            double yaw = Math.atan2(dy, dx);
+            
+            // Calculate pitch (around y-axis)
+            double pitch = Math.atan2(dz, Math.sqrt(dx*dx + dy*dy));
+            
+            // Convert to quaternion (simplified)
+            double cy = Math.cos(yaw * 0.5);
+            double sy = Math.sin(yaw * 0.5);
+            double cp = Math.cos(pitch * 0.5);
+            double sp = Math.sin(pitch * 0.5);
+            
+            return new Quaternion(
+                (float)(sp * cy),
+                (float)(cp * sy),
+                (float)(cp * cy),
+                (float)(sp * sy)
+            );
         }
     }
 }
